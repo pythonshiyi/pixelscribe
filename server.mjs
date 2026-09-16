@@ -233,15 +233,23 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CFG.port, () => {
   const mode = CFG.apiKey ? '在线模式' : '演示模式（未配置 PX_API_KEY）';
+  const A = '\x1b[38;5;213m';
+  const C = '\x1b[36m';
+  const B = '\x1b[1m';
+  const R = '\x1b[0m';
   const lines = [
     '',
-    '  \x1b[38;5;213m█▀█ █ ▀▄▀ █▀▀ █   █▀▄ █▀█ █ █ █▀ █▀█\x1b[0m',
-    '  \x1b[38;5;213m█▀▀ █ █ █ █▆▅ █▄▄ █▄▀ █▀▄ █▄█ ▄█ █▀▀\x1b[0m',
+    `  ${A}+==========================================+${R}`,
+    `  ${A}|  P I X E L S C R I B E                   |${R}`,
+    `  ${A}|  像素画笔 · LLM 驱动 的像素美术引擎       |${R}`,
+    `  ${A}+==========================================+${R}`,
     '',
-    `  \x1b[36m➜\x1b[0m  本地地址:  \x1b[1mhttp://localhost:${CFG.port}/\x1b[0m`,
-    `  \x1b[36m➜\x1b[0m  运行模式:  ${mode}`,
-    `  \x1b[36m➜\x1b[0m  模型:      ${CFG.model}`,
-    `  \x1b[36m➜\x1b[0m  端点:      ${CFG.baseUrl}`,
+    `  ${C}>${R} 本地地址:  ${B}http://localhost:${CFG.port}/${R}`,
+    `  ${C}>${R} 运行模式:  ${mode}`,
+    `  ${C}>${R} 模型:      ${CFG.model}`,
+    `  ${C}>${R} 端点:      ${CFG.baseUrl}`,
+    '',
+    `  按 ${B}Ctrl+C${R} 停止服务`,
     '',
   ];
   console.log(lines.join('\n'));
