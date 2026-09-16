@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>像素画笔 · PixelScribe</title>
+<meta name="description" content="让多模态大模型通过 PixelScript DSL + 视觉闭环产出专业级像素美术" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230f0f16'/><rect x='6' y='6' width='9' height='9' fill='%23ff77a8'/><rect x='17' y='6' width='9' height='9' fill='%2329adff'/><rect x='6' y='17' width='9' height='9' fill='%23ffec27'/><rect x='17' y='17' width='9' height='9' fill='%2300e436'/></svg>" />
+<link rel="stylesheet" href="styles/app.css" />
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/><path d="M14 7l3 3"/></symbol>
+  <symbol id="i-eraser" viewBox="0 0 24 24"><path d="M15 3l6 6-9 9H7l-4-4 12-11z"/><path d="M9 9l6 6"/></symbol>
+  <symbol id="i-bucket" viewBox="0 0 24 24"><path d="M5 11l7-7 7 7-7 7-7-7z"/><path d="M19 15c1.5 2 1.5 3.5 0 3.5S17.5 17 19 15z"/></symbol>
+  <symbol id="i-dropper" viewBox="0 0 24 24"><path d="M17 2l5 5-3 3-5-5 3-3z"/><path d="M14 5L4 15v5h5L19 10"/></symbol>
+  <symbol id="i-line" viewBox="0 0 24 24"><path d="M4 20L20 4"/></symbol>
+  <symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1"/></symbol>
+  <symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></symbol>
+  <symbol id="i-select" viewBox="0 0 24 24" stroke-dasharray="4 3"><rect x="3" y="3" width="18" height="18" rx="1"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h9a6 6 0 010 12H8"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9h-9a6 6 0 000 12h5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></symbol>
+  <symbol id="i-zin" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4M11 8v6M8 11h6"/></symbol>
+  <symbol id="i-zout" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4M8 11h6"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M4 3h16"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eyeoff" viewBox="0 0 24 24"><path d="M3 3l18 18M10 5a10 10 0 0112 7 10 10 0 01-3 4M5 7a10 10 0 00-3 5s4 7 10 7a10 10 0 004-1"/></symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24"><path d="M4 20L15 9"/><path d="M16 3l1 3 3 1-3 1-1 3-1-3-3-1 3-1z"/><path d="M7 4l.7 2 2 .7-2 .7L7 9.4l-.7-2-2-.7 2-.7z"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M8 6l-4 6 4 6M16 6l4 6-4 6"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 000 18c1.5 0 2-1 2-2s-.5-2-2-2h-1a2 2 0 010-4h6a4 4 0 004-4c0-3.5-4-6-9-6z"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16" cy="10" r="1"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="1"/><path d="M5 15H4V4h11v1"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.3-5.6M20 3v5h-5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M4 18l5-5 4 4 3-3 4 4"/></symbol>
+  <symbol id="i-sym" viewBox="0 0 24 24"><path d="M12 3v18" stroke-dasharray="3 2"/><path d="M8 7L4 12l4 5M16 7l4 5-4 5"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <span class="brand-name">像素画笔</span>
+    <span class="brand-sub">PixelScribe</span>
+  </div>
+
+  <input id="docTitle" class="doc-title" type="text" value="未命名" spellcheck="false" aria-label="文档标题" />
+
+  <div class="topbar-group">
+    <button class="tb" id="btnUndo" title="撤销 (Ctrl+Z)"><svg><use href="#i-undo"/></svg></button>
+    <button class="tb" id="btnRedo" title="重做 (Ctrl+Y)"><svg><use href="#i-redo"/></svg></button>
+  </div>
+
+  <div class="topbar-group">
+    <button class="tb" id="btnZoomOut" title="缩小 (-)"><svg><use href="#i-zout"/></svg></button>
+    <span class="zoom-readout" id="zoomReadout">1200%</span>
+    <button class="tb" id="btnZoomIn" title="放大 (+)"><svg><use href="#i-zin"/></svg></button>
+    <button class="tb" id="btnFit" title="适应窗口 (0)"><svg><use href="#i-fit"/></svg></button>
+  </div>
+
+  <div class="topbar-group">
+    <button class="tb" id="btnGrid" title="网格 (Ctrl+G)"><svg><use href="#i-grid"/></svg></button>
+    <div class="seg" id="segSym" role="group" aria-label="对称">
+      <button data-sym="off" class="on" title="关闭对称">关</button>
+      <button data-sym="x" title="左右对称">X</button>
+      <button data-sym="y" title="上下对称">Y</button>
+      <button data-sym="xy" title="四向对称">XY</button>
+    </div>
+  </div>
+
+  <div class="topbar-spacer"></div>
+
+  <div class="topbar-group">
+    <button class="tb" id="btnNew" title="新建"><svg><use href="#i-plus"/></svg></button>
+    <button class="tb" id="btnImport" title="导入图片 / 脚本"><svg><use href="#i-upload"/></svg></button>
+    <button class="tb" id="btnExport" title="导出 PNG"><svg><use href="#i-download"/></svg></button>
+    <button class="tb" id="btnSettings" title="设置"><svg><use href="#i-gear"/></svg></button>
+  </div>
+</header>
+
+<main class="workspace">
+  <aside class="rail">
+    <div class="rail-group" role="toolbar" aria-label="绘图工具">
+      <button class="tool on" data-tool="pencil" title="铅笔 (B)"><svg><use href="#i-pencil"/></svg></button>
+      <button class="tool" data-tool="eraser" title="橡皮 (E)"><svg><use href="#i-eraser"/></svg></button>
+      <button class="tool" data-tool="bucket" title="油漆桶 (G)"><svg><use href="#i-bucket"/></svg></button>
+      <button class="tool" data-tool="dropper" title="吸管 (I)"><svg><use href="#i-dropper"/></svg></button>
+      <button class="tool" data-tool="line" title="直线 (L)"><svg><use href="#i-line"/></svg></button>
+      <button class="tool" data-tool="rect" title="矩形 (R)"><svg><use href="#i-rect"/></svg></button>
+      <button class="tool" data-tool="circle" title="椭圆 (O)"><svg><use href="#i-circle"/></svg></button>
+      <button class="tool" data-tool="select" title="选区 (M)"><svg><use href="#i-select"/></svg></button>
+    </div>
+
+    <div class="rail-sep"></div>
+
+    <div class="colors" id="colorStack">
+      <button class="color-slot" id="colorPrimary" title="主色 (X 交换)">
+        <span class="swatch" id="swPrimary"></span>
+        <span class="idx" id="idxPrimary">c0</span>
+      </button>
+      <button class="color-slot sub" id="colorSecondary" title="副色 (X 交换)">
+        <span class="swatch" id="swSecondary"></span>
+        <span class="idx" id="idxSecondary">c7</span>
+      </button>
+      <button class="color-x" id="btnSwap" title="交换主副色 (X)">⇄</button>
+    </div>
+
+    <div class="rail-sep"></div>
+
+    <div class="rail-group small">
+      <button class="tool" id="btnAddPaletteColor" title="新增颜色"><svg><use href="#i-plus"/></svg></button>
+      <button class="tool" id="btnExtract" title="从图像提取色板"><svg><use href="#i-image"/></svg></button>
+    </div>
+  </aside>
+
+  <section class="stage" id="stage">
+    <canvas id="stageCanvas"></canvas>
+    <div class="stage-hud" id="stageHud">—</div>
+    <div class="stage-badge" id="stageBadge">32 × 32</div>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs" id="tabs">
+      <button class="tab on" data-tab="ai"><svg><use href="#i-wand"/></svg><span>AI 生成</span></button>
+      <button class="tab" data-tab="script"><svg><use href="#i-code"/></svg><span>脚本</span></button>
+      <button class="tab" data-tab="layers"><svg><use href="#i-layers"/></svg><span>图层</span></button>
+      <button class="tab" data-tab="palette"><svg><use href="#i-palette"/></svg><span>色板</span></button>
+    </nav>
+
+    <div class="panes">
+      <!-- ── AI ── -->
+      <div class="pane on" data-pane="ai">
+        <div class="ai-setup">
+          <div class="field">
+            <label for="aiBrief">需求描述</label>
+            <textarea id="aiBrief" rows="3" spellcheck="false" placeholder="例如：32×32 的火焰史莱姆精灵图，绿色身体带橙色高光"></textarea>
+          </div>
+          <div class="chips" id="aiExamples">
+            <button class="chip">32×32 史莱姆</button>
+            <button class="chip">16×16 红药水道具</button>
+            <button class="chip">64×64 山景背景</button>
+            <button class="chip">32×32 机器人头像</button>
+            <button class="chip">48×48 幽灵敌人</button>
+          </div>
+          <div class="ai-controls">
+            <label class="switch"><input type="checkbox" id="aiIncremental" checked /><span>增量迭代</span></label>
+            <label class="mini-field"><span>轮次</span><input id="aiMaxIter" type="number" min="1" max="12" value="6" /></label>
+            <label class="mini-field"><span>画布</span>
+              <select id="aiSize">
+                <option value="16">16</option>
+                <option value="24">24</option>
+                <option value="32" selected>32</option>
+                <option value="48">48</option>
+                <option value="64">64</option>
+                <option value="96">96</option>
+                <option value="128">128</option>
+              </select>
+            </label>
+          </div>
+          <div class="ai-actions">
+            <button class="btn primary" id="btnGenerate"><svg><use href="#i-wand"/></svg><span>开始生成</span></button>
+            <button class="btn danger" id="btnAbort" disabled><svg><use href="#i-stop"/></svg><span>中止</span></button>
+          </div>
+          <div class="ai-status" id="aiStatus">就绪</div>
+        </div>
+
+        <div class="ai-log" id="aiLog">
+          <div class="empty-state">
+            <svg><use href="#i-wand"/></svg>
+            <p>描述你想要的像素画，模型会通过<br /><b>PixelScript → 渲染 → 视觉回灌</b> 闭环逐轮逼近。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 脚本 ── -->
+      <div class="pane" data-pane="script">
+        <div class="pane-toolbar">
+          <button class="btn small primary" id="btnRunScript"><svg><use href="#i-play"/></svg><span>运行</span></button>
+          <label class="switch"><input type="checkbox" id="scriptReplace" checked /><span>清空后绘制</span></label>
+          <div class="flex-spacer"></div>
+          <button class="btn small ghost" id="btnFormatScript" title="规范化缩进与空行">整理</button>
+          <button class="btn small ghost" id="btnCopyScript" title="复制脚本"><svg><use href="#i-copy"/></svg></button>
+          <button class="btn small ghost" id="btnSamples" title="示例库">示例</button>
+        </div>
+        <div class="code-wrap">
+          <div class="gutter" id="scriptGutter">1</div>
+          <textarea id="scriptEditor" spellcheck="false" wrap="off" placeholder="size 32 32
+palette pico8
+clear transparent
+sym x
+ellipse 16 20 11 8 c3 fill
+outline c1"></textarea>
+        </div>
+        <div class="script-report" id="scriptReport">尚未运行</div>
+      </div>
+
+      <!-- ── 图层 ── -->
+      <div class="pane" data-pane="layers">
+        <div class="pane-toolbar">
+          <button class="btn small" id="btnAddLayer"><svg><use href="#i-plus"/></svg><span>新建</span></button>
+          <button class="btn small ghost" id="btnMergeLayer">向下合并</button>
+          <div class="flex-spacer"></div>
+          <button class="btn small ghost danger" id="btnDeleteLayer"><svg><use href="#i-trash"/></svg></button>
+        </div>
+        <div class="layer-list" id="layerList"></div>
+        <div class="layer-props" id="layerProps">
+          <label class="range-field"><span>不透明度</span><input type="range" id="layerOpacity" min="0" max="100" value="100" /><b id="layerOpacityVal">100%</b></label>
+          <label class="switch"><input type="checkbox" id="layerLocked" /><span>锁定图层</span></label>
+        </div>
+      </div>
+
+      <!-- ── 色板 ── -->
+      <div class="pane" data-pane="palette">
+        <div class="pane-toolbar">
+          <select id="palettePreset" class="select">
+            <option value="pico8">PICO-8（16 色）</option>
+            <option value="gameboy">Game Boy（4 色）</option>
+            <option value="cga">CGA / DOS（16 色）</option>
+            <option value="gray">灰度（8 色）</option>
+            <option value="bw">黑白（2 色）</option>
+          </select>
+          <div class="flex-spacer"></div>
+          <button class="btn small ghost" id="btnExtract2" title="从图像提取"><svg><use href="#i-image"/></svg></button>
+        </div>
+        <div class="swatches" id="swatchGrid"></div>
+        <div class="palette-editor" id="paletteEditor">
+          <label class="mini-field wide"><span>颜色</span><input type="color" id="paletteColorInput" /></label>
+          <label class="mini-field wide"><span>Hex</span><input type="text" id="paletteHexInput" spellcheck="false" /></label>
+          <div class="palette-editor-actions">
+            <button class="btn small" id="btnApplyColor">应用</button>
+            <button class="btn small ghost" id="btnAddColor">新增色块</button>
+          </div>
+        </div>
+        <p class="hint">提示：在画布上按住 <kbd>Alt</kbd> 点击可取色；点击色块编辑该索引的颜色。</p>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer class="statusbar">
+  <span id="stCoords">—, —</span>
+  <span class="sep"></span>
+  <span id="stColor">c0 #000000</span>
+  <span class="sep"></span>
+  <span id="stSize">32 × 32</span>
+  <span class="sep"></span>
+  <span id="stTool">铅笔</span>
+  <div class="flex-spacer"></div>
+  <span id="stAi" class="st-ai">演示模式</span>
+  <div class="flex-spacer"></div>
+  <span id="stPixels">0 像素</span>
+  <span class="sep"></span>
+  <span id="stHistory">历史 0</span>
+</footer>
+
+<!-- ── 模态 ── -->
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" id="modalBox" role="dialog" aria-modal="true">
+    <header class="modal-head"><h2 id="modalTitle">标题</h2><button class="tb" id="modalClose"><svg><use href="#i-x"/></svg></button></header>
+    <div class="modal-body" id="modalBody"></div>
+    <footer class="modal-foot" id="modalFoot"></footer>
+  </div>
+</div>
+
+<input type="file" id="filePicker" accept=".png,.pxs,.txt,image/*" hidden />
+<div class="toast-host" id="toastHost"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

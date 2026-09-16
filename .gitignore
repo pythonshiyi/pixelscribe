@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 环境变量（含 API Key）
+.env
+.env.local
+
+# 测试产物
+out/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# 临时脚本
+dbg*.mjs
+audit.mjs
+imports.mjs
+sheet.py
+verify.py
+preview.py
