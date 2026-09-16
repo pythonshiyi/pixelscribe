@@ -25,20 +25,47 @@ PixelScribe 换了个思路：
 ## 30 秒上手
 
 ```bash
-# 1. 配置模型（可选，不配也能跑演示模式）
-cp .env.example .env
+# 1. 进入项目目录
+cd pixelscribe
+
+# 2. 配置模型（可选，跳过则进入离线演示模式）
+cp .env.example .env        # Windows: copy .env.example .env
 #   编辑 .env，填 PX_BASE_URL / PX_API_KEY / PX_MODEL
 
-# 2. 启动
+# 3. 启动
 npm start
 
-# 3. 打开
+# 4. 浏览器打开
 #    http://localhost:5173
 ```
 
-无任何 npm 依赖，Node 20+ 即可。
+启动后终端会打印监听地址与当前模式。按 `Ctrl+C` 停止。
+
+无任何 npm 依赖，**Node 20+ 即可运行**，不需要 `npm install`。
 
 > 开发测试需要 `npm install` 安装 jsdom（仅 devDependency），运行应用本身不需要。
+
+### 常见启动问题
+
+| 现象 | 原因与处理 |
+|---|---|
+| 端口被占用 | 改 `.env` 里的 `PX_PORT`，或 `set PX_PORT=8080 && npm start` |
+| 终端中文/边框乱码 | Windows 旧控制台请先执行 `chcp 65001` 切到 UTF-8 |
+| 提示"演示模式" | 未读到 `PX_API_KEY`。确认 `.env` 与 `server.mjs` 同目录 |
+| 页面空白 | 必须通过 `http://localhost:5173` 访问；直接双击 `index.html`（`file://`）会被浏览器拦截 ES Module |
+| 模型报 401 / 404 | 检查 `PX_BASE_URL` 是否含 `/v1`，以及 `PX_MODEL` 是否为**支持视觉输入**的模型 |
+
+---
+
+## 手动指定端口 / 临时覆盖配置
+
+```bash
+# Windows PowerShell
+$env:PX_PORT=8080; npm start
+
+# macOS / Linux
+PX_PORT=8080 npm start
+```
 
 ---
 
