@@ -16,6 +16,8 @@ function snapshotDoc(doc) {
     title: doc.title,
     symmetry: doc.symmetry,
     seed: doc.seed,
+    style: doc.style,
+    lights: Array.isArray(doc.lights) ? doc.lights.map((l) => ({ ...l })) : [],
     activeLayerIndex: doc.activeLayerIndex,
     paletteHex: doc.palette.toJSON().hex,
     paletteLabel: doc.palette.label,
@@ -25,6 +27,8 @@ function snapshotDoc(doc) {
       visible: l.visible,
       opacity: l.opacity,
       locked: l.locked,
+      kind: l.kind,
+      meta: l.meta ? { ...l.meta } : null,
       data: l.buffer.snapshot(),
     })),
   };
@@ -36,6 +40,8 @@ function restoreDoc(doc, snap) {
   doc.title = snap.title;
   doc.symmetry = snap.symmetry;
   doc.seed = snap.seed;
+  doc.style = snap.style ?? 'pixel';
+  doc.lights = Array.isArray(snap.lights) ? snap.lights.map((l) => ({ ...l })) : [];
   doc.activeLayerIndex = snap.activeLayerIndex;
   doc.layers = snap.layers.map((s) => {
     const l = new Layer(snap.width, snap.height, s.name);
@@ -43,6 +49,8 @@ function restoreDoc(doc, snap) {
     l.visible = s.visible;
     l.opacity = s.opacity;
     l.locked = s.locked;
+    l.kind = s.kind ?? 'raster';
+    l.meta = s.meta ? { ...s.meta } : null;
     l.buffer.restore(s.data);
     return l;
   });
@@ -58,6 +66,8 @@ function sameState(a, b) {
   if (a.layers.length !== b.layers.length) return false;
   if (a.activeLayerIndex !== b.activeLayerIndex) return false;
   if (a.width !== b.width || a.height !== b.height) return false;
+  if ((a.style ?? 'pixel') !== (b.style ?? 'pixel')) return false;
+  if (JSON.stringify(a.lights ?? []) !== JSON.stringify(b.lights ?? [])) return false;
   for (let i = 0; i < a.layers.length; i++) {
     const x = a.layers[i], y = b.layers[i];
     if (x.id !== y.id || x.visible !== y.visible || x.opacity !== y.opacity) return false;

@@ -18,6 +18,10 @@ import {
 import { parseColor, adjust as adjustColor, mix } from '../util/color.js';
 import { Palette } from '../core/palette.js';
 import { glyph, GLYPH_W, GLYPH_H } from './font5x7.js';
+import {
+  applyRelief, applySpecular, applyBloom, blur as blurOp, applyTone, applyFbm,
+  applyProceduralPipeline, normalizeStyle,
+} from '../core/effects.js';
 
 /** @typedef {import('../util/color.js').RGBA} RGBA */
 /** @typedef {import('../core/document.js').PixelDocument} PixelDocument */
@@ -249,6 +253,37 @@ export const COMMANDS = {
     doc: 'name "TITLE" —— 设置文档标题',
     run(ctx, a) {
       ctx.doc.title = a[0].value;
+      return { structural: true };
+    },
+  },
+
+  style: {
+    min: 1, max: 1,
+    doc: 'style pixel|painting|ink|anime|3d|photo —— 设定作品风格（决定渲染后端）',
+    run(ctx, a) {
+      const s = normalizeStyle(a[0].value);
+      ctx.doc.style = s;
+      return { structural: true };
+    },
+  },
+
+  light: {
+    min: 2, max: 5,
+    doc: 'light DX DY [Z] [STRENGTH] [COLOR] —— 声明方向光（DX DY 指向光源，如 -1 -1 表示左上）',
+    run(ctx, a) {
+      const dx = num(a[0]), dy = num(a[1]);
+      let z = 1, strength = 1, color = { r: 255, g: 255, b: 255 };
+      const nums = [];
+      for (let i = 2; i < a.length; i++) {
+        const tok = a[i];
+        if (!tok.quoted && Number.isFinite(Number(tok.value))) { nums.push(Number(tok.value)); continue; }
+        const c = parseColor(tok.value, ctx.palette);
+        if (c) color = c;
+      }
+      if (nums.length >= 1) z = nums[0];
+      if (nums.length >= 2) strength = nums[1];
+      if (!Array.isArray(ctx.doc.lights)) ctx.doc.lights = [];
+      ctx.doc.lights.push({ dx, dy, z, strength, color });
       return { structural: true };
     },
   },
@@ -683,6 +718,108 @@ export const COMMANDS = {
       });
     },
   },
+
+  /* ── 程序化渲染（S1：写实质感） ── */
+  relief: {
+    min: 0, max: 3,
+    doc: 'relief [STRENGTH] [AMBIENT] [NORMAL_STRENGTH] —— 方向光浮雕（用已声明的 light 给画面加体积）',
+    run(ctx, a) {
+      applyRelief(ctx.buf, {
+        strength: numOr(a[0], 0.85),
+        ambient: numOr(a[1], 0.35),
+        normalStrength: numOr(a[2], 2),
+        lights: ctx.doc.lights,
+      });
+    },
+  },
+
+  specular: {
+    min: 0, max: 3,
+    doc: 'specular [STRENGTH] [POWER] [NORMAL_STRENGTH] —— 镜面高光（给材质加湿润/金属光泽）',
+    run(ctx, a) {
+      applySpecular(ctx.buf, {
+        strength: numOr(a[0], 0.6),
+        power: numOr(a[1], 16),
+        normalStrength: numOr(a[2], 2),
+        lights: ctx.doc.lights,
+      });
+    },
+  },
+
+  bloom: {
+    min: 0, max: 3,
+    doc: 'bloom [THRESHOLD] [STRENGTH] [RADIUS] —— 高光溢出/辉光（光源、金属、魔法效果）',
+    run(ctx, a) {
+      applyBloom(ctx.buf, { threshold: numOr(a[0], 0.7), strength: numOr(a[1], 0.6), radius: numOr(a[2], 2) });
+    },
+  },
+
+  blur: {
+    min: 0, max: 1,
+    doc: 'blur [RADIUS] —— 高斯近似模糊（软化、景深感）',
+    run(ctx, a) {
+      blurOp(ctx.buf, numOr(a[0], 1));
+    },
+  },
+
+  tone: {
+    min: 0, max: 5,
+    doc: 'tone [GAMMA] [CONTRAST] [SATURATION] [BRIGHTNESS] [VIGNETTE] —— 相机色调映射（写实的关键一步）',
+    run(ctx, a) {
+      applyTone(ctx.buf, {
+        gamma: numOr(a[0], 1.08),
+        contrast: numOr(a[1], 1.12),
+        saturation: numOr(a[2], 1.05),
+        brightness: numOr(a[3], 0),
+        vignette: numOr(a[4], 0.15),
+      });
+    },
+  },
+
+  fbm: {
+    min: 6, max: 9,
+    doc: 'fbm X Y W H C1 C2 [OCTAVES] [SCALE] [fill|over|mod] —— 分形噪声材质（石头/木纹/云/皮革）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const c1 = color(a[4], ctx.palette), c2 = color(a[5], ctx.palette);
+      const octaves = Math.max(1, Math.min(8, Math.round(numOr(a[6], 4))));
+      const scale = Math.max(0.5, numOr(a[7], 4));
+      const m = mode(a[8], ['fill', 'over', 'mod', 'add', 'multiply', 'mult'], 'fill');
+      const md = m.startsWith('mult') ? 'mod' : m === 'add' ? 'over' : m;
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        applyFbm(ctx.buf, { x: q.x, y: q.y, w: q.w, h: q.h, c1, c2, octaves, scale, mode: md, seed: ctx._rngSeed ^ (q.x * 73856093) ^ (q.y * 19349663) });
+      });
+    },
+  },
+
+  render: {
+    min: 0, max: 1,
+    doc: 'render [STYLE] —— 按风格执行渲染管线（程序化先验；在线时可由视觉闭环升级为神经渲染）',
+    run(ctx, a) {
+      const style = a.length ? normalizeStyle(a[0].value) : (ctx.doc.style || 'pixel');
+      ctx.doc.style = style;
+      ctx.doc.renderRequested = style;
+      // 闭环中由 Agent 以非破坏方式统一渲染到神经残差层，
+      // 避免多轮迭代把 tone/relief 重复叠加到程序层（deferRender）。
+      if (!ctx.options.deferRender) {
+        applyProceduralPipeline(ctx.buf, style, { lights: ctx.doc.lights, seed: ctx._rngSeed });
+      }
+    },
+  },
+
+  inpaint: {
+    min: 5, max: 6,
+    doc: 'inpaint X Y W H "PROMPT" [STRENGTH] —— 局部重绘（只细化该区域，其余保持不变）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const prompt = String(a[4].value);
+      const strength = Math.max(0, Math.min(1, numOr(a[5], 0.6)));
+      if (!Array.isArray(ctx.doc.inpaintRequests)) ctx.doc.inpaintRequests = [];
+      ctx.doc.inpaintRequests.push({ ...r, prompt, strength });
+      return { structural: true };
+    },
+  },
 };
 
 /* ───────────────────────── 主入口 ───────────────────────── */
@@ -718,7 +855,7 @@ export function runScript(source, doc, options = {}) {
   const before = ctx.buf.snapshot();
   const srcLines = String(source ?? '').split(/\r?\n/);
   const maxOps = options.maxOps ?? 20000;
-  const NON_DRAW = new Set(['size', 'palette', 'sym', 'seed', 'name']);
+  const NON_DRAW = new Set(['size', 'palette', 'sym', 'seed', 'name', 'style', 'light', 'inpaint']);
 
   srcLines.forEach((text, i) => {
     const toks = tokenize(text);

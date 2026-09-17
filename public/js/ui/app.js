@@ -2,17 +2,21 @@
  * 应用控制器：把引擎、语言、AI 与 UI 装配在一起
  */
 
-import { $, $$, el, toast, modal, downloadDataURL, downloadText, readTextFile, readDataURL } from './dom.js';
-import { PixelDocument } from '../core/document.js';
+import { $, $$, el, toast, modal, downloadDataURL, downloadText, downloadBytes, readTextFile, readDataURL } from './dom.js';
+import { PixelDocument, Layer } from '../core/document.js';
 import { History } from '../core/history.js';
 import { Renderer } from '../core/renderer.js';
+import { Animation } from '../core/animation.js';
+import { encodePNG } from '../io/png.js';
 import { PixelBuffer } from '../core/buffer.js';
 import { Tools } from './tools.js';
 import { ChatPanel } from './chat.js';
 import { Gallery } from './gallery.js';
+import { Agent } from '../ai/agent.js';
 import { initLayers, initPalette, initScript } from './panels.js';
 import { rgbaToHex } from '../util/color.js';
 import { runScript } from '../lang/compiler.js';
+import { imageToPixels } from '../io/img2pixel.js';
 import { SAMPLES } from '../samples.js';
 
 const STORAGE_KEY = 'pixelscribe.doc.v1';
@@ -39,6 +43,12 @@ export class App {
     this.secondaryIndex = 7;
     this.spaceDown = false;
     this._dirty = false;
+
+    /** 动画帧模型（v1.5） */
+    this.animation = new Animation({ fps: 8 });
+    this.playing = false;
+    this._frameTimer = null;
+    this._suppressCapture = false;
   }
 
   /* ── 生命周期 ── */
@@ -57,6 +67,7 @@ export class App {
     this.bindTabs();
     this.bindKeys();
     this.bindStageResize();
+    this.bindFrameBar();
 
     const restored = this.restore();
     if (!restored) {
@@ -64,7 +75,16 @@ export class App {
       runScript(SAMPLES[0].code, this.doc, { mode: 'replace' });
       this.doc.title = '史莱姆';
       $('#docTitle').value = '史莱姆';
+      this.animation = new Animation({ fps: 8 });
+      this.animation.capture(this.doc, true);
     }
+    if (!this.animation || !this.animation.length) {
+      this.animation = new Animation({ fps: 8 });
+      this.animation.capture(this.doc, true);
+    } else {
+      this.animation.capture(this.doc);
+    }
+    this.syncFrames();
 
     this.history.onChange(() => this.updateStatus());
     this.updateColorUI();
@@ -121,6 +141,11 @@ export class App {
         sizeSel.value = String(this.doc.width);
       }
     }
+    if (!this._suppressCapture && this.animation?.length) {
+      this.animation.capture(this.doc);
+      this.refreshCurrentThumb();
+    }
+    this.updateOnion();
     this.requestRender();
     this.updateStatus();
     this.layersPanel?.refresh();
@@ -194,6 +219,8 @@ export class App {
     $('#stTool').textContent = this.tools.name;
     $('#stSize').textContent = `${this.doc.width} × ${this.doc.height}`;
     $('#stHistory').textContent = `历史 ${this.history.undoStack.length}`;
+    const sf = $('#stFrame');
+    if (sf && this.animation) sf.textContent = `帧 ${this.animation.current + 1}/${this.animation.length}`;
     $('#btnUndo').disabled = !this.history.canUndo;
     $('#btnRedo').disabled = !this.history.canRedo;
   }
@@ -206,6 +233,149 @@ export class App {
   refreshLayers() {
     this.layersPanel?.refresh();
     this.updateStatus();
+  }
+
+  /* ── 动画帧 ── */
+
+  bindFrameBar() {
+    $('#btnFrameAdd')?.addEventListener('click', () => {
+      this.animation.insertBlank(this.doc);
+      this.afterEdit(true);
+      this.syncFrames();
+      toast(`已新增第 ${this.animation.current + 1} 帧`, 'ok', 1200);
+    });
+    $('#btnFrameDup')?.addEventListener('click', () => {
+      this.animation.duplicate(this.doc);
+      this.afterEdit(true);
+      this.syncFrames();
+    });
+    $('#btnFrameDel')?.addEventListener('click', () => {
+      if (!this.animation.remove(this.animation.current)) { this.warn('至少保留一帧'); return; }
+      this.animation.applyTo(this.doc, this.animation.current);
+      this.afterEdit(true);
+      this.syncFrames();
+    });
+    $('#btnFramePlay')?.addEventListener('click', () => this.togglePlay());
+    $('#btnFrameOnion')?.addEventListener('click', () => {
+      this.animation.onion = this.animation.onion >= 2 ? 0 : this.animation.onion + 1;
+      const b = $('#btnFrameOnion');
+      if (b) {
+        b.classList.toggle('on', this.animation.onion > 0);
+        b.textContent = this.animation.onion === 0 ? '◍' : this.animation.onion === 1 ? '◐' : '◑';
+      }
+      this.updateOnion();
+      this.requestRender();
+    });
+    $('#frameFps')?.addEventListener('change', (e) => {
+      this.animation.fps = Math.max(1, Math.min(30, Number(e.target.value) || 8));
+      e.target.value = String(this.animation.fps);
+      if (this.playing) this.restartPlayTimer();
+    });
+  }
+
+  selectFrame(i) {
+    this._suppressCapture = true;
+    this.animation.select(this.doc, i);
+    this._suppressCapture = false;
+    this.renderer.setDocument(this.doc);
+    this.afterEdit(true);
+  }
+
+  togglePlay() {
+    if (this.playing) { this.stopPlay(); return; }
+    if (this.animation.length < 2) { this.warn('至少需要 2 帧才能播放'); return; }
+    this.animation.capture(this.doc);
+    this.playing = true;
+    const b = $('#btnFramePlay');
+    if (b) { b.classList.add('on'); b.textContent = '⏸'; }
+    this.restartPlayTimer();
+  }
+
+  restartPlayTimer() {
+    clearInterval(this._frameTimer);
+    const ms = Math.max(33, 1000 / Math.max(1, this.animation.fps));
+    this._frameTimer = setInterval(() => {
+      const next = (this.animation.current + 1) % this.animation.length;
+      this._suppressCapture = true;
+      this.animation.applyTo(this.doc, next);
+      this.animation.current = next;
+      this._suppressCapture = false;
+      this.renderer.setDocument(this.doc);
+      this.updateOnion();
+      this.requestRender();
+      this.updateFrameHighlight();
+      this.updateStatus();
+    }, ms);
+  }
+
+  stopPlay() {
+    this.playing = false;
+    clearInterval(this._frameTimer);
+    this._frameTimer = null;
+    const b = $('#btnFramePlay');
+    if (b) { b.classList.remove('on'); b.textContent = '▶'; }
+  }
+
+  syncFrames() {
+    const list = $('#frameList');
+    if (!list) return;
+    list.replaceChildren();
+    for (let i = 0; i < this.animation.length; i++) {
+      const btn = el('button', {
+        class: `frame-thumb${i === this.animation.current ? ' on' : ''}`,
+        title: `第 ${i + 1} 帧`,
+        onclick: () => this.selectFrame(i),
+      }, [
+        el('img', { src: this.animation.thumbnailDataURL(i, 40), alt: `帧 ${i + 1}` }),
+        el('span', { class: 'fno', text: String(i + 1) }),
+      ]);
+      list.append(btn);
+    }
+    const del = $('#btnFrameDel');
+    if (del) del.disabled = this.animation.length <= 1;
+    this.updateOnion();
+    this.updateStatus();
+  }
+
+  updateFrameHighlight() {
+    const list = $('#frameList');
+    if (!list) return;
+    [...list.children].forEach((c, i) => c.classList.toggle('on', i === this.animation.current));
+  }
+
+  refreshCurrentThumb() {
+    const list = $('#frameList');
+    if (!list) return;
+    const btn = list.children[this.animation.current];
+    const img = btn?.querySelector('img');
+    if (img) img.src = this.animation.thumbnailDataURL(this.animation.current, 40);
+  }
+
+  updateOnion() {
+    const n = this.animation?.onion || 0;
+    if (!n || this.animation.length < 2) { this.renderer.onion = null; return; }
+    const i = this.animation.current;
+    const mk = (idx, color) => {
+      if (idx < 0 || idx >= this.animation.length) return null;
+      const b = this.animation.frameBuffer(idx).clone();
+      this.tintBuffer(b, color, 0.6, 110);
+      return b;
+    };
+    this.renderer.onion = {
+      prev: n >= 1 ? mk(i - 1, { r: 255, g: 60, b: 80 }) : null,
+      next: n >= 2 ? mk(i + 1, { r: 60, g: 140, b: 255 }) : null,
+    };
+  }
+
+  tintBuffer(buf, color, amount, alpha) {
+    const d = buf.data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] === 0) continue;
+      d[i] = Math.round(d[i] * (1 - amount) + color.r * amount);
+      d[i + 1] = Math.round(d[i + 1] * (1 - amount) + color.g * amount);
+      d[i + 2] = Math.round(d[i + 2] * (1 - amount) + color.b * amount);
+      d[i + 3] = alpha;
+    }
   }
 
   /** 切换主题（dark / light），同步画布配色并持久化。 */
@@ -226,12 +396,22 @@ export class App {
 
   setAiBadge() {
     const elx = $('#stAi');
+    const neural = this.config.neuralRender ? ' · 神经渲染' : '';
     if (this.config.demoMode) {
       elx.textContent = '演示模式（未配置 API Key）';
       elx.className = 'st-ai';
     } else {
-      elx.textContent = `在线 · ${this.config.model}`;
+      elx.textContent = `在线 · ${this.config.model}${neural}`;
       elx.className = 'st-ai online';
+    }
+    this.syncStyleUI();
+  }
+
+  /** 把文档风格同步到 AI 面板的风格选择器。 */
+  syncStyleUI() {
+    const sel = $('#aiStyle');
+    if (sel && this.doc?.style && [...sel.options].some((o) => o.value === this.doc.style)) {
+      sel.value = this.doc.style;
     }
   }
 
@@ -273,6 +453,9 @@ export class App {
     $('#btnExport').addEventListener('click', () => this.exportDialog());
     $('#btnTheme').addEventListener('click', () => this.applyTheme(this.settings.theme === 'light' ? 'dark' : 'light'));
     $('#btnSettings').addEventListener('click', () => this.settingsDialog());
+    $('#btnLocalRedraw')?.addEventListener('click', () => {
+      this.applyLocalRender(this.renderer.selection, $('#aiBrief')?.value?.trim() || '');
+    });
 
     for (const b of $$('.tool[data-tool]')) {
       b.addEventListener('click', () => this.tools.setTool(b.dataset.tool));
@@ -389,7 +572,7 @@ export class App {
       if (file.type.startsWith('image/')) {
         const dataURL = await readDataURL(file);
         await this.pixelizeImage(dataURL);
-        toast('图片已转换为像素画', 'ok');
+        toast('图片已导入', 'ok');
         return;
       }
       toast('不支持的文件类型', 'warn');
@@ -412,6 +595,16 @@ export class App {
     const body = el('div', { class: 'grid2' }, [
       el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'pxQuantize', checked: true }), el('span', { text: '吸附到当前调色板' })]),
       el('label', { class: 'mini-field wide' }, [el('span', { text: '渐隐阈值' }), el('input', { type: 'number', id: 'pxAlpha', value: '128', min: '0', max: '255' })]),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '抖动' }), el('select', { id: 'pxDither' }, [
+        el('option', { value: 'none', text: '无（锐利色块）' }),
+        el('option', { value: 'floyd', text: 'Floyd–Steinberg（照片级过渡）' }),
+        el('option', { value: 'bayer', text: 'Bayer（有序，像素风）' }),
+      ])]),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '采样' }), el('select', { id: 'pxSample' }, [
+        el('option', { value: 'average', text: '面积平均（更平滑）' }),
+        el('option', { value: 'nearest', text: '最近邻（保硬边）' }),
+      ])]),
+      el('label', { class: 'switch wide' }, [el('input', { type: 'checkbox', id: 'pxReference' }), el('span', { text: '作为 AI 参考层（ControlNet 引导，不转像素画）' })]),
     ]);
 
     await new Promise((resolve) => {
@@ -430,14 +623,11 @@ export class App {
     });
   }
 
-  _doPixelize(img) {
-    const quantize = $('#pxQuantize')?.checked ?? true;
-    const alphaCut = Number($('#pxAlpha')?.value ?? 128);
+  /** 把图片作为 AI 参考层（不转像素画），供神经后端 ControlNet 式引导。 */
+  _doImportReference(img) {
     const { width: w, height: h } = this.doc;
-
     const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
+    c.width = w; c.height = h;
     const g = c.getContext('2d', { willReadFrequently: true });
     g.imageSmoothingEnabled = true;
     g.clearRect(0, 0, w, h);
@@ -447,15 +637,62 @@ export class App {
     g.drawImage(img, Math.round((w - dw) / 2), Math.round((h - dh) / 2), dw, dh);
     const data = g.getImageData(0, 0, w, h).data;
 
+    const activeId = this.doc.activeLayer?.id;
+    this.history.begin('导入参考图');
+    this.doc.layers = this.doc.layers.filter((l) => l.kind !== 'reference');
+    const layer = new Layer(w, h, '参考图');
+    layer.kind = 'reference';
+    layer.opacity = 0.4;
+    layer.locked = true;
+    layer.buffer.data.set(data);
+    this.doc.layers.unshift(layer);
+    const idx = this.doc.layers.findIndex((l) => l.id === activeId);
+    this.doc.activeLayerIndex = idx >= 0 ? idx : this.doc.layers.length - 1;
+    this.history.commit();
+    this.afterEdit(true);
+    toast('已添加 AI 参考层（神经后端将用作引导）', 'ok');
+  }
+
+  _doPixelize(img) {
+    if ($('#pxReference')?.checked) { this._doImportReference(img); return; }
+    const quantize = $('#pxQuantize')?.checked ?? true;
+    const alphaCut = Number($('#pxAlpha')?.value ?? 128);
+    const dither = $('#pxDither')?.value || 'none';
+    const sample = $('#pxSample')?.value || 'average';
+    const { width: w, height: h } = this.doc;
+
+    // 把参考图按最大边等比缩放绘制到临时画布，保持宽高比并居中
+    const scale = Math.min(w / img.width, h / img.height);
+    const dw = Math.max(1, Math.round(img.width * scale));
+    const dh = Math.max(1, Math.round(img.height * scale));
+    const src = document.createElement('canvas');
+    src.width = dw;
+    src.height = dh;
+    const sg = src.getContext('2d', { willReadFrequently: true });
+    sg.imageSmoothingEnabled = true;
+    sg.clearRect(0, 0, dw, dh);
+    sg.drawImage(img, 0, 0, dw, dh);
+    const srcData = sg.getImageData(0, 0, dw, dh).data;
+
+    // 在裁剪窗口内做高质量降采样 + 量化 + 抖动
+    const cw = Math.min(w, dw), ch = Math.min(h, dh);
+    const ox = Math.floor((w - cw) / 2), oy = Math.floor((h - ch) / 2);
+    const pixels = imageToPixels(srcData, dw, dh, cw, ch, {
+      palette: this.doc.palette,
+      quantize,
+      dither,
+      sample,
+      alphaCut,
+      edge: 0.35,
+    });
+
     this.history.begin('导入图片');
     const buf = this.doc.activeLayer.buffer;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4;
-        let col = { r: data[i], g: data[i + 1], b: data[i + 2], a: data[i + 3] >= alphaCut ? 255 : 0 };
-        if (col.a === 0) { buf.set(x, y, { r: 0, g: 0, b: 0, a: 0 }); continue; }
-        if (quantize) col = this.nearestPalette(col);
-        buf.set(x, y, col);
+    buf.clear({ r: 0, g: 0, b: 0, a: 0 });
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        const si = (y * cw + x) * 4;
+        buf.set(ox + x, oy + y, { r: pixels[si], g: pixels[si + 1], b: pixels[si + 2], a: pixels[si + 3] });
       }
     }
     this.history.commit();
@@ -495,6 +732,9 @@ export class App {
       body,
       actions: [
         { label: '导出 .pxs 脚本', kind: 'ghost', onClick: () => this.exportScript() },
+        { label: '精灵表 PNG', kind: 'ghost', onClick: () => this.exportSpriteSheet() },
+        { label: 'GIF', kind: 'ghost', onClick: () => this.exportGIF() },
+        { label: 'Aseprite', kind: 'ghost', onClick: () => this.exportAseprite() },
         {
           label: '导出 PNG',
           kind: 'primary',
@@ -508,6 +748,31 @@ export class App {
         },
       ],
     });
+  }
+
+  exportSpriteSheet() {
+    this.animation.capture(this.doc);
+    const ss = this.animation.toSpritesheet();
+    if (!ss) { this.warn('没有可导出的帧'); return; }
+    const png = encodePNG(ss.data, ss.width, ss.height);
+    downloadBytes(`${this.doc.title || 'pixelscribe'}_sheet.png`, png, 'image/png');
+    toast(`已导出精灵表 ${ss.width}×${ss.height}（${ss.count} 帧）`, 'ok');
+  }
+
+  exportGIF() {
+    this.animation.capture(this.doc);
+    const gif = this.animation.toGIF(this.doc.palette.colors);
+    if (!gif) { this.warn('没有可导出的帧'); return; }
+    downloadBytes(`${this.doc.title || 'pixelscribe'}.gif`, gif, 'image/gif');
+    toast(`已导出 GIF（${this.animation.length} 帧 · ${this.animation.fps}fps）`, 'ok');
+  }
+
+  exportAseprite() {
+    this.animation.capture(this.doc);
+    const ase = this.animation.toAseprite(this.doc.title || 'Layer');
+    if (!ase) { this.warn('没有可导出的帧'); return; }
+    downloadBytes(`${this.doc.title || 'pixelscribe'}.aseprite`, ase, 'application/octet-stream');
+    toast(`已导出 Aseprite（${this.animation.length} 帧）`, 'ok');
   }
 
   exportScript() {
@@ -545,12 +810,21 @@ export class App {
           el('option', { value: 'off', text: 'off（纯文本审查）' }),
         ])]),
       ]),
-      el('div', { class: 'field' }, [el('label', { text: '单轮最大输出 token' }), el('input', { type: 'number', id: 'setMaxTokens', value: String(st.maxTokens), min: '256', max: '32768', step: '256' })]),
+      el('div', { class: 'grid2' }, [
+        el('div', { class: 'field' }, [el('label', { text: '单轮最大输出 token' }), el('input', { type: 'number', id: 'setMaxTokens', value: String(st.maxTokens), min: '256', max: '32768', step: '256' })]),
+        el('div', { class: 'field' }, [el('label', { text: '视觉细节级别' }), el('select', { id: 'setVisionDetail' }, [
+          el('option', { value: 'high', text: 'high / original（保留原图，推荐）' }),
+          el('option', { value: 'low', text: 'low（缩到 512×512，更省 token）' }),
+          el('option', { value: 'auto', text: 'auto' }),
+        ])]),
+      ]),
+      el('p', { html: `神经渲染后端：<b>${this.config.neuralRender ? '已配置' : '未配置（使用程序化渲染）'}</b>` }),
       el('p', { text: '提示：生产环境建议保持直连模式关闭，把 Key 放在服务端 .env 中。' }),
     ]);
     setTimeout(() => {
       const ts = $('#setThinking'); if (ts) ts.value = String(st.thinking || 'auto');
       const vs = $('#setVisionMode'); if (vs) vs.value = String(st.vision || 'auto');
+      const vd = $('#setVisionDetail'); if (vd) vd.value = String(st.visionDetail || 'high');
     }, 0);
 
     modal({
@@ -569,6 +843,7 @@ export class App {
               apiKey: $('#setKey').value.trim(),
               temperature: Number($('#setTemp').value) || 0.6,
               visionLongEdge: Number($('#setVision').value) || 384,
+              visionDetail: $('#setVisionDetail')?.value || 'high',
               thinking: $('#setThinking')?.value || 'auto',
               vision: $('#setVisionMode')?.value || 'auto',
               maxTokens: Number($('#setMaxTokens')?.value) || 2048,
@@ -595,6 +870,35 @@ export class App {
     return r;
   }
 
+  /**
+   * 局部重绘：只细化选区内的像素，其余保持不变。
+   * 神经后端可用时走 inpaint，否则用程序化先验局部细化。
+   * @param {{x:number,y:number,w:number,h:number}|null} rect
+   * @param {string} [prompt]
+   */
+  async applyLocalRender(rect, prompt = '') {
+    if (!rect) { this.warn('请先用选区工具（M）框选要重绘的区域'); return null; }
+    this.history.begin('局部重绘');
+    const agent = new Agent({
+      provider: null,
+      renderer: this.renderer,
+      doc: this.doc,
+      history: this.history,
+      neuralAvailable: Boolean(this.config.neuralRender),
+      neuralPrompt: prompt,
+    });
+    let result = null;
+    try {
+      result = await agent.inpaintRegion({ ...rect, prompt, strength: 0.6 });
+    } catch (err) {
+      this.warn(`局部重绘失败：${err.message}`);
+    }
+    this.history.commit();
+    this.afterEdit(true);
+    if (result) toast(`局部重绘完成（${result.backend === 'neural' ? '神经渲染' : '程序化细化'}）`, 'ok');
+    return result;
+  }
+
   /** 把脚本载入编辑器（不执行，避免覆盖当前画面） */
   loadScript(code) {
     this.scriptPanel.setValue(code);
@@ -608,11 +912,12 @@ export class App {
   defaultSettings() {
     return {
       directMode: false,
-      baseUrl: this.config.baseUrl || 'https://opencode.ai/zen/go/v1',
-      model: this.config.model || 'deepseek-v4.1-flash',
+      baseUrl: this.config.baseUrl || 'https://api.deepseek.com',
+      model: this.config.model || 'deepseek-flash',
       apiKey: '',
       temperature: this.config.temperature ?? 0.6,
       visionLongEdge: this.config.visionLongEdge ?? 384,
+      visionDetail: this.config.visionDetail ?? 'high',
       maxIterations: this.config.maxIterations ?? 6,
       thinking: this.config.thinking ?? 'auto',
       vision: this.config.vision ?? 'auto',
@@ -624,11 +929,12 @@ export class App {
   loadSettings() {
     const base = {
       directMode: false,
-      baseUrl: this.config?.baseUrl || 'https://opencode.ai/zen/go/v1',
-      model: this.config?.model || 'deepseek-v4.1-flash',
+      baseUrl: this.config?.baseUrl || 'https://api.deepseek.com',
+      model: this.config?.model || 'deepseek-flash',
       apiKey: '',
       temperature: this.config?.temperature ?? 0.6,
       visionLongEdge: this.config?.visionLongEdge ?? 384,
+      visionDetail: this.config?.visionDetail ?? 'high',
       maxIterations: this.config?.maxIterations ?? 6,
       thinking: this.config?.thinking ?? 'auto',
       vision: this.config?.vision ?? 'auto',
@@ -658,6 +964,7 @@ export class App {
         doc: this.doc.toJSON(),
         script: this.scriptPanel?.getValue() ?? '',
         camera: { scale: this.renderer.scale, offsetX: this.renderer.offsetX, offsetY: this.renderer.offsetY },
+        animation: this.animation?.toJSON(),
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       this._dirty = false;
@@ -673,6 +980,10 @@ export class App {
       const payload = JSON.parse(raw);
       const doc = PixelDocument.fromJSON(payload.doc);
       this.doc = doc;
+      if (payload.animation) {
+        try { this.animation = Animation.fromJSON(payload.animation); } catch { /* 忽略损坏的动画数据 */ }
+        if (this.animation?.frames?.length) $('#frameFps') && ($('#frameFps').value = String(this.animation.fps));
+      }
       this.history = new History(doc, 120);
       this.renderer.setDocument(doc);
       if (payload.camera) Object.assign(this.renderer, payload.camera);
@@ -686,6 +997,7 @@ export class App {
       const preset = Object.entries({ pico8: 'PICO-8', gameboy: 'Game Boy', cga: 'CGA / DOS', gray: 'Grayscale 8', bw: 'Black & White' })
         .find(([, v]) => v === doc.palette.label);
       if (preset) $('#palettePreset').value = preset[0];
+      this.syncStyleUI();
       toast('已从本地恢复上次会话', 'ok', 1800);
       return true;
     } catch {

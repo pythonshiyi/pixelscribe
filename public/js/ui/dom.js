@@ -125,6 +125,17 @@ export function downloadDataURL(filename, dataURL) {
   a.remove();
 }
 
+/** 下载二进制（用于 GIF / Aseprite） */
+export function downloadBytes(filename, bytes, mime = 'application/octet-stream') {
+  const blob = new Blob([bytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** 防抖 */
 export function debounce(fn, ms = 200) {
   let t;

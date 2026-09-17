@@ -27,9 +27,25 @@ import { encodePNG, encodePNGScaled, toBase64, toDataURL } from '../public/js/io
 import { demoScript, demoCritique, demoReply, DemoProvider } from '../public/js/ai/demo.js';
 import {
   Provider, normalizeBaseUrl, isOpencodeEndpoint, isOfficialEndpoint, isThinkingRejection,
+  isDeepseekFlashModel, sanitizeMessages,
 } from '../public/js/ai/provider.js';
-import { buildSystemPrompt, buildCritique, buildRepair } from '../public/js/ai/prompts.js';
+import { buildSystemPrompt, buildCritique, buildRepair, computeTiles, STYLE_GUIDE } from '../public/js/ai/prompts.js';
+import { Agent } from '../public/js/ai/agent.js';
 import { SAMPLES } from '../public/js/samples.js';
+import {
+  surfaceNormals, applyRelief, applySpecular, applyBloom, blur as blurFn, applyTone,
+  applyFbm, normalizeStyle, applyProceduralPipeline, STYLE_PRESETS,
+} from '../public/js/core/effects.js';
+import {
+  resolveBackendId, controlMapDataURL, controlMaps, normalizeNeuralResponse, BACKEND_IDS,
+  cropBuffer, pasteBuffer, clampRect, maskMapDataURL,
+} from '../public/js/core/backends.js';
+import {
+  nearestColor, boxDownsample, nearestDownsample, unsharp, quantize, imageToPixels,
+} from '../public/js/io/img2pixel.js';
+import { lzwEncode, encodeGIF, quantizeFrame } from '../public/js/io/gif.js';
+import { encodeAseprite } from '../public/js/io/aseprite.js';
+import { Animation } from '../public/js/core/animation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -442,8 +458,8 @@ describe('PixelScript 词法', () => {
     eq(t[1].value, 'A "B"');
   });
 
-  it('指令表规模符合文档（33 条）', () => {
-    eq(Object.keys(COMMANDS).length, 33);
+  it('指令表规模符合文档（43 条：33 绘制 + 9 渲染 + 1 局部重绘）', () => {
+    eq(Object.keys(COMMANDS).length, 43);
   });
 
   it('dslReference 列出全部指令', () => {
@@ -1225,6 +1241,680 @@ describe('端到端：内置范例渲染', () => {
   });
 });
 
+/* ═══════════════ 12.5 程序化渲染效果（S1） ═══════════════ */
+
+describe('程序化渲染效果（S1）', () => {
+  const white = { r: 255, g: 255, b: 255, a: 255 };
+
+  it('法线场为归一化向量', () => {
+    const b = new PixelBuffer(8, 8);
+    b.clear({ r: 100, g: 100, b: 100, a: 255 });
+    const N = surfaceNormals(b, 2);
+    eq(N.length, 8 * 8 * 3);
+    const i = (4 * 8 + 4) * 3; // 内部像素（平涂区）
+    const len = Math.hypot(N[i], N[i + 1], N[i + 2]);
+    assert(Math.abs(len - 1) < 1e-5, `法线未归一化：${len}`);
+    assert(Math.abs(N[i + 2] - 1) < 1e-5, '平涂内部法线应朝向观察者');
+  });
+
+  it('浮雕受光改变像素且不动透明区', () => {
+    const b = new PixelBuffer(16, 16);
+    fillEllipse(b, 8, 8, 6, 6, { r: 128, g: 128, b: 128, a: 255 });
+    const before = b.clone();
+    applyRelief(b, { strength: 1, ambient: 0.3, lights: [{ dx: -1, dy: -1, z: 1, strength: 1 }] });
+    assert(b.diffCount(before) > 10, '浮雕应产生明暗变化');
+    eq(b.get(0, 0).a, 0, '透明区不应被点亮');
+  });
+
+  it('高光沿法线叠加光源色', () => {
+    const b = new PixelBuffer(24, 24);
+    fillEllipse(b, 12, 12, 10, 10, { r: 120, g: 60, b: 60, a: 255 });
+    const before = b.clone();
+    applySpecular(b, { strength: 1, power: 8, lights: [{ dx: -1, dy: -1, z: 1, strength: 1 }] });
+    assert(b.diffCount(before) > 0, '应出现高光');
+  });
+
+  it('blur 扩散单像素', () => {
+    const b = new PixelBuffer(8, 8);
+    b.clear({ r: 0, g: 0, b: 0, a: 0 });
+    b.set(4, 4, white);
+    blurFn(b, 1);
+    assert(b.get(3, 4).a > 0, '邻域应被扩散到');
+    assert(b.opaqueCount() > 1);
+  });
+
+  it('bloom 让亮部溢出', () => {
+    const b = new PixelBuffer(8, 8);
+    b.clear({ r: 0, g: 0, b: 0, a: 255 });
+    b.set(4, 4, white);
+    applyBloom(b, { threshold: 0.5, strength: 1, radius: 1 });
+    assert(b.get(3, 4).r > 10, '亮部周围应被提亮');
+  });
+
+  it('tone 的 gamma 提亮中间调', () => {
+    const b = new PixelBuffer(4, 4);
+    b.clear({ r: 128, g: 128, b: 128, a: 255 });
+    applyTone(b, { gamma: 2 });
+    assert(b.get(0, 0).r > 128, `gamma>1 应提亮，实际 ${b.get(0, 0).r}`);
+  });
+
+  it('tone 的 saturation=0 变灰阶', () => {
+    const b = new PixelBuffer(4, 4);
+    b.clear({ r: 255, g: 0, b: 0, a: 255 });
+    applyTone(b, { saturation: 0 });
+    const c = b.get(0, 0);
+    assert(Math.abs(c.r - c.g) <= 1 && Math.abs(c.g - c.b) <= 1, `未灰阶：${JSON.stringify(c)}`);
+  });
+
+  it('fbm 同种子可复现、模式 mod 调制明度', () => {
+    const a = new PixelBuffer(16, 16);
+    const b = new PixelBuffer(16, 16);
+    a.clear({ r: 100, g: 100, b: 100, a: 255 });
+    b.clear({ r: 100, g: 100, b: 100, a: 255 });
+    applyFbm(a, { x: 0, y: 0, w: 16, h: 16, c1: { r: 0, g: 0, b: 0, a: 255 }, c2: white, octaves: 4, scale: 4, mode: 'mod', seed: 7 });
+    applyFbm(b, { x: 0, y: 0, w: 16, h: 16, c1: { r: 0, g: 0, b: 0, a: 255 }, c2: white, octaves: 4, scale: 4, mode: 'mod', seed: 7 });
+    eq(a.diffCount(b), 0, '同种子应可复现');
+    const flat = new PixelBuffer(16, 16);
+    flat.clear({ r: 100, g: 100, b: 100, a: 255 });
+    assert(a.diffCount(flat) > 20, 'mod 应调制明度');
+  });
+
+  it('风格管线：pixel 不改动，photo 改动', () => {
+    const b = new PixelBuffer(24, 24);
+    fillEllipse(b, 12, 12, 9, 9, { r: 180, g: 120, b: 80, a: 255 });
+    const before = b.clone();
+    applyProceduralPipeline(b, 'pixel');
+    eq(b.diffCount(before), 0, 'pixel 应保持原样');
+    applyProceduralPipeline(b, 'photo', { lights: [{ dx: -1, dy: -1, z: 1, strength: 1 }] });
+    assert(b.diffCount(before) > 0, 'photo 管线应改变画面');
+  });
+
+  it('normalizeStyle 归一化别名', () => {
+    eq(normalizeStyle('photoreal'), 'photo');
+    eq(normalizeStyle('oil'), 'painting');
+    eq(normalizeStyle('lineart'), 'ink');
+    eq(normalizeStyle('未知'), 'pixel');
+    for (const k of Object.keys(STYLE_PRESETS)) eq(normalizeStyle(k), k);
+  });
+});
+
+/* ═══════════════ 12.6 渲染后端与控制图（S2/S3） ═══════════════ */
+
+describe('渲染后端与控制图', () => {
+  it('风格 → 后端解析（神经不可用时降级）', () => {
+    eq(resolveBackendId('pixel'), 'raster');
+    eq(resolveBackendId('painting'), 'procedural');
+    eq(resolveBackendId('photo', { neuralAvailable: false }), 'procedural');
+    eq(resolveBackendId('photo', { neuralAvailable: true }), 'neural');
+    eq(resolveBackendId('pixel', { explicit: 'neural', neuralAvailable: true }), 'neural');
+    eq(resolveBackendId('pixel', { explicit: 'neural', neuralAvailable: false }), 'raster');
+    deepEq(BACKEND_IDS, ['raster', 'procedural', 'neural']);
+  });
+
+  it('四种控制图均可导出为 PNG dataURL', () => {
+    const b = new PixelBuffer(16, 16);
+    fillEllipse(b, 8, 8, 6, 6, { r: 200, g: 100, b: 50, a: 255 });
+    for (const kind of ['edges', 'depth', 'normal', 'alpha']) {
+      const url = controlMapDataURL(b, kind, 64);
+      assert(url.startsWith('data:image/png;base64,iVBOR'), `${kind} 不是 PNG`);
+      assert(url.length > 100, `${kind} 数据过短`);
+    }
+    const all = controlMaps(b, 64);
+    deepEq(Object.keys(all).sort(), ['alpha', 'depth', 'edges', 'normal']);
+  });
+
+  it('神经响应归一化兼容多种形态', () => {
+    eq(normalizeNeuralResponse({ image: 'data:image/png;base64,AAA' }), 'data:image/png;base64,AAA');
+    eq(normalizeNeuralResponse({ data: [{ b64_json: 'AAA' }] }), 'data:image/png;base64,AAA');
+    eq(normalizeNeuralResponse({ data: [{ url: 'https://x/y.png' }] }), 'https://x/y.png');
+    eq(normalizeNeuralResponse({ images: ['data:image/png;base64,BBB'] }), 'data:image/png;base64,BBB');
+    eq(normalizeNeuralResponse(null), null);
+    eq(normalizeNeuralResponse({ nope: 1 }), null);
+  });
+});
+
+/* ═══════════════ 12.7 新增 DSL 指令（9 条） ═══════════════ */
+
+describe('新增程序化渲染指令', () => {
+  const exec = (code, doc) => runScript(code, doc || new PixelDocument(16, 16), { mode: 'replace', seed: 7 });
+
+  it('style 设置并归一化风格', () => {
+    const d = new PixelDocument(8, 8);
+    assert(exec('style photoreal', d).ok);
+    eq(d.style, 'photo');
+  });
+
+  it('light 声明方向光（含颜色）', () => {
+    const d = new PixelDocument(8, 8);
+    const r = exec('light -1 -1 1 0.8 #ff0000\nlight 1 1 0.5 0.3', d);
+    assert(r.ok, r.errors.join(';'));
+    eq(d.lights.length, 2);
+    eq(d.lights[0].dx, -1);
+    eq(d.lights[0].color.r, 255);
+    eq(d.lights[1].strength, 0.3);
+  });
+
+  it('relief / specular / bloom / blur / tone 均可用', () => {
+    const d = new PixelDocument(24, 24);
+    let r = exec('bg c5\nlight -1 -1 1 1\nrelief 0.8 0.3', d);
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('specular 0.6 16', d, { mode: 'append' });
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('bloom 0.7 0.5 2', d, { mode: 'append' });
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('blur 1', d, { mode: 'append' });
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('tone 1.08 1.12 1.05 0 0.1', d, { mode: 'append' });
+    assert(r.ok, r.errors.join(';'));
+  });
+
+  it('fbm 生成可复现材质', () => {
+    const a = new PixelDocument(16, 16);
+    const b = new PixelDocument(16, 16);
+    const code = 'seed 3\nfbm 0 0 16 16 c1 c7 4 4 fill';
+    assert(exec(code, a).ok);
+    assert(exec(code, b).ok);
+    eq(a.activeLayer.buffer.diffCount(b.activeLayer.buffer), 0);
+  });
+
+  it('render 应用风格管线并记录请求', () => {
+    const d = new PixelDocument(24, 24);
+    const r = exec('bg c4\ncircle 12 12 8 c9 fill\nrender photo', d);
+    assert(r.ok, r.errors.join(';'));
+    eq(d.style, 'photo');
+    eq(d.renderRequested, 'photo');
+    assert(r.changed > 20, `render 应改变画面：${r.changed}`);
+  });
+
+  it('tone 参数越界不报错且安全裁剪', () => {
+    const d = new PixelDocument(8, 8);
+    const r = exec('bg c8\ntone 9 9 9 9 9', d);
+    assert(r.ok, r.errors.join(';'));
+  });
+
+  it('deferRender 只记录风格、不改动程序层（闭环统一渲染）', () => {
+    const d = new PixelDocument(16, 16);
+    runScript('bg c4\ncircle 8 8 5 c9 fill', d, { mode: 'replace' });
+    const before = d.activeLayer.buffer.clone();
+    const r = runScript('render photo', d, { mode: 'append', deferRender: true });
+    eq(r.changed, 0, 'deferRender 不应改动程序层');
+    eq(d.style, 'photo');
+    eq(d.renderRequested, 'photo');
+    eq(d.activeLayer.buffer.diffCount(before), 0);
+  });
+});
+
+/* ═══════════════ 12.8 DeepSeek 多模态适配 ═══════════════ */
+
+describe('DeepSeek 多模态适配', () => {
+  it('识别 deepseek-flash / vision 系列', () => {
+    eq(isDeepseekFlashModel('deepseek-flash'), true);
+    eq(isDeepseekFlashModel('deepseek-v4-flash-vision-exp'), true);
+    eq(isDeepseekFlashModel('deepseek-chat'), false);
+    eq(isDeepseekFlashModel('gpt-4o'), false);
+  });
+
+  it('deepseek-flash 不下发 thinking（除显式开启）', () => {
+    const p = new Provider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', thinking: 'auto' });
+    eq(p.thinkingBody(), null);
+    const p2 = new Provider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', thinking: 'disabled' });
+    eq(p2.thinkingBody(), null);
+    const p3 = new Provider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', thinking: 'enabled' });
+    deepEq(p3.thinkingBody(), { type: 'enabled' });
+  });
+
+  it('DeepSeek 官方端点（含 /v1 变体）被识别', () => {
+    eq(isOfficialEndpoint('https://api.deepseek.com'), true);
+    eq(isOfficialEndpoint('https://api.deepseek.com/v1'), true);
+  });
+
+  it('sanitizeMessages 移除非 user 消息中的图片', () => {
+    const msgs = [
+      { role: 'system', content: [{ type: 'text', text: 'sys' }, { type: 'image_url', image_url: { url: 'x' } }] },
+      { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: 'y' } }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'image_url', image_url: { url: 'z' } }] },
+    ];
+    const out = sanitizeMessages(msgs);
+    eq(typeof out[0].content, 'string');
+    eq(Array.isArray(out[1].content), true, 'user 图片应保留');
+    eq(out[1].content.filter((p) => p.type === 'image_url').length, 1);
+    eq(typeof out[2].content, 'string');
+  });
+
+  it('Provider 请求体经清洗后不含 system/assistant 图片', () => {
+    const p = new Provider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', proxy: false, apiKey: 'k' });
+    const body = p.buildPayload([
+      { role: 'system', content: [{ type: 'text', text: 's' }, { type: 'image_url', image_url: { url: 'a' } }] },
+      { role: 'user', content: 'hi' },
+    ], {}, true);
+    assert(!JSON.stringify(body.messages[0]).includes('image_url'), 'system 图片应被清洗');
+    eq(body.thinking, undefined, 'flash 不应带 thinking');
+    eq(body.model, 'deepseek-flash');
+  });
+});
+
+/* ═══════════════ 12.9 区域诊断与风格提示 ═══════════════ */
+
+describe('区域诊断与风格提示', () => {
+  it('computeTiles 定位改动热区', () => {
+    const before = new PixelBuffer(30, 30);
+    const after = new PixelBuffer(30, 30);
+    fillEllipse(after, 25, 25, 4, 4, { r: 255, g: 0, b: 0, a: 255 });
+    const tiles = computeTiles(before, after, 3);
+    eq(tiles.length, 9);
+    const hot = tiles.filter((t) => t.changed > 0);
+    assert(hot.length >= 1, '应至少有一个改动区域');
+    assert(hot[0].label === '右下', `热区应落在右下，实际 ${hot[0].label}`);
+  });
+
+  it('STYLE_GUIDE 覆盖全部风格', () => {
+    for (const k of Object.keys(STYLE_PRESETS)) assert(STYLE_GUIDE[k], `缺少风格提示 ${k}`);
+  });
+
+  it('系统提示包含风格与渲染后端状态', () => {
+    const p = buildSystemPrompt({ width: 32, height: 32, paletteName: 'PICO-8', paletteSize: 16, title: 'x', style: 'photo', neuralRender: true });
+    assert(p.includes('photo'), '应包含风格');
+    assert(p.includes('神经后端'), '应包含渲染后端状态');
+    assert(p.includes('render'), '应含 render 指令');
+  });
+
+  it('审查提示包含区域热区', () => {
+    const tiles = [{ label: '中心', x: 8, y: 8, w: 8, h: 8, changed: 40, dominant: '#ff0000' }];
+    const p = buildCritique({ iteration: 2, max: 6, mode: 'append', report: { ops: 5, changed: 60 }, tiles, style: 'photo', hasImage: true });
+    assert(p.includes('中心'), '应包含区域名');
+    assert(p.includes('改动 40'), '应包含区域改动量');
+  });
+});
+
+/* ═══════════════ 12.10 参考图 → 像素画（img2pixel） ═══════════════ */
+
+describe('参考图 → 像素画（img2pixel）', () => {
+  const makeRGBA = (w, h, fn) => {
+    const a = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const c = fn(x, y); const i = (y * w + x) * 4;
+      a[i] = c.r; a[i + 1] = c.g; a[i + 2] = c.b; a[i + 3] = c.a;
+    }
+    return a;
+  };
+  const whites = (a) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] === 255) n++; return n; };
+
+  it('最近色匹配（感知加权）', () => {
+    const p = Palette.from('pico8');
+    deepEq(nearestColor({ r: 255, g: 0, b: 0, a: 255 }, p.colors), p.colors[8]);
+    deepEq(nearestColor({ r: 0, g: 0, b: 0, a: 255 }, p.colors), p.colors[0]);
+  });
+
+  it('面积平均降采样（红蓝各半 → 混合）', () => {
+    const src = makeRGBA(2, 2, (x) => (x === 0 ? { r: 255, g: 0, b: 0, a: 255 } : { r: 0, g: 0, b: 255, a: 255 }));
+    const out = boxDownsample(src, 2, 2, 1, 1);
+    assert(out[0] > 100 && out[2] > 100, `应混合：r=${out[0]} b=${out[2]}`);
+  });
+
+  it('最近邻降采样保持硬边', () => {
+    const src = makeRGBA(4, 4, (x) => (x < 2 ? { r: 255, g: 0, b: 0, a: 255 } : { r: 0, g: 255, b: 0, a: 255 }));
+    const out = nearestDownsample(src, 4, 4, 2, 2);
+    deepEq([out[0], out[1], out[2], out[3]], [255, 0, 0, 255]);
+    deepEq([out[4], out[5], out[6], out[7]], [0, 255, 0, 255]);
+  });
+
+  it('unsharp 增强边缘对比', () => {
+    const src = makeRGBA(3, 3, () => ({ r: 100, g: 100, b: 100, a: 255 }));
+    const i = (1 * 3 + 1) * 4;
+    src[i] = src[i + 1] = src[i + 2] = 160;
+    const out = unsharp(src, 3, 3, 0.5);
+    assert(out[i] > 160, `中心应被增强：${out[i]}`);
+  });
+
+  it('量化到 bw：深灰变黑、浅灰变白', () => {
+    const src = makeRGBA(2, 1, (x) => (x === 0 ? { r: 40, g: 40, b: 40, a: 255 } : { r: 230, g: 230, b: 230, a: 255 }));
+    const out = quantize(src, 2, 1, Palette.from('bw'));
+    eq(out[0], 0);
+    eq(out[4], 255);
+  });
+
+  it('Floyd 抖动在中灰上产生黑白混合', () => {
+    const src = makeRGBA(8, 8, () => ({ r: 64, g: 64, b: 64, a: 255 }));
+    const none = quantize(src, 8, 8, Palette.from('bw'), { dither: 'none' });
+    const floyd = quantize(src, 8, 8, Palette.from('bw'), { dither: 'floyd' });
+    eq(whites(none), 0, '无抖动应全黑');
+    assert(whites(floyd) > 0 && whites(floyd) < 64, `抖动应产生混合，实际白 ${whites(floyd)}`);
+  });
+
+  it('imageToPixels 一站式输出目标尺寸', () => {
+    const src = makeRGBA(8, 8, () => ({ r: 255, g: 0, b: 0, a: 255 }));
+    const out = imageToPixels(src, 8, 8, 4, 4, { palette: Palette.from('pico8'), quantize: true, dither: 'none' });
+    eq(out.length, 4 * 4 * 4);
+    eq(out[0], 255, '应吸附到 pico8 红');
+    eq(out[1], 0);
+    eq(out[3], 255);
+  });
+});
+
+/* ═══════════════ 12.11 区域工具与局部重绘 ═══════════════ */
+
+describe('区域工具与局部重绘', () => {
+  it('clampRect 归一化并裁剪到画布', () => {
+    deepEq(clampRect({ x: -2, y: -2, w: 8, h: 8 }, 16, 16), { x: 0, y: 0, w: 6, h: 6 });
+    deepEq(clampRect({ x: 8, y: 8, w: -4, h: -4 }, 16, 16), { x: 4, y: 4, w: 4, h: 4 });
+    eq(clampRect({ x: 100, y: 100, w: 4, h: 4 }, 16, 16), null);
+  });
+
+  it('cropBuffer / pasteBuffer 配合蒙版限定区域', () => {
+    const b = new PixelBuffer(16, 16);
+    b.fillRect(2, 2, 4, 4, { r: 255, g: 0, b: 0, a: 255 }, false);
+    const c = cropBuffer(b, { x: 2, y: 2, w: 4, h: 4 });
+    eq(c.width, 4);
+    deepEq(c.get(0, 0), { r: 255, g: 0, b: 0, a: 255 });
+
+    const dst = new PixelBuffer(16, 16);
+    pasteBuffer(dst, c, 8, 8, { x: 8, y: 8, w: 2, h: 2 });
+    deepEq(dst.get(8, 8), { r: 255, g: 0, b: 0, a: 255 }, '蒙版内应写入');
+    eq(dst.get(10, 10).a, 0, '蒙版外不应写入');
+  });
+
+  it('maskMapDataURL 为全画布 PNG 且随区域变化', () => {
+    const b = new PixelBuffer(16, 16);
+    const m1 = maskMapDataURL(b, { x: 0, y: 0, w: 8, h: 8 });
+    const m2 = maskMapDataURL(b, { x: 8, y: 8, w: 8, h: 8 });
+    for (const m of [m1, m2]) assert(m.startsWith('data:image/png;base64,iVBOR'), '应为 PNG');
+    assert(m1 !== m2, '不同区域应产生不同蒙版');
+  });
+
+  it('inpaint 指令记录请求且不改变像素', () => {
+    const d = new PixelDocument(16, 16);
+    runScript('bg c4\ncircle 8 8 5 c9 fill', d, { mode: 'replace' });
+    const before = d.activeLayer.buffer.clone();
+    const r = runScript('inpaint 4 4 8 8 "furry detail" 0.7', d, { mode: 'append' });
+    assert(r.ok, r.errors.join(';'));
+    eq(r.changed, 0, 'inpaint 本身不应改像素');
+    eq(d.inpaintRequests.length, 1);
+    eq(d.inpaintRequests[0].prompt, 'furry detail');
+    eq(d.inpaintRequests[0].strength, 0.7);
+    eq(d.activeLayer.buffer.diffCount(before), 0);
+  });
+});
+
+/* ═══════════════ 12.12 动画帧 / spritesheet / GIF / Aseprite（v1.5） ═══════════════ */
+
+/** 测试用 GIF LZW 解码器（与 lzwEncode 对拍） */
+function lzwDecode(minCode, data) {
+  const clear = 1 << minCode, eoi = clear + 1;
+  let codeSize = minCode + 1;
+  let dict = [];
+  const reset = () => { dict = []; for (let i = 0; i < clear; i++) dict[i] = [i]; dict[clear] = []; dict[eoi] = []; codeSize = minCode + 1; };
+  reset();
+  let bitPos = 0;
+  const read = () => {
+    let code = 0;
+    for (let i = 0; i < codeSize; i++) {
+      const byte = data[bitPos >> 3];
+      if (byte === undefined) return -1;
+      if (byte & (1 << (bitPos & 7))) code |= 1 << i;
+      bitPos++;
+    }
+    return code;
+  };
+  const out = [];
+  let prev = null;
+  for (;;) {
+    const code = read();
+    if (code < 0 || code === eoi) break;
+    if (code === clear) { reset(); prev = null; continue; }
+    let entry;
+    if (dict[code]) entry = dict[code];
+    else if (prev) entry = [...prev, prev[0]];
+    else entry = [];
+    for (const v of entry) out.push(v);
+    if (prev) dict.push([...prev, entry[0]]);
+    if (dict.length === (1 << codeSize) && codeSize < 12) codeSize++;
+    prev = entry;
+  }
+  return out;
+}
+
+/** 测试用 GIF 结构解析器 */
+function parseGIF(bytes) {
+  let p = 0;
+  const u8 = () => bytes[p++];
+  const u16 = () => { const v = bytes[p] | (bytes[p + 1] << 8); p += 2; return v; };
+  const sig = String.fromCharCode(...bytes.slice(0, 6)); p = 6;
+  const w = u16(), h = u16(), packed = u8();
+  u8(); u8();
+  const gctSize = 1 << ((packed & 7) + 1);
+  const gct = [];
+  if (packed & 0x80) for (let i = 0; i < gctSize; i++) gct.push([bytes[p++], bytes[p++], bytes[p++]]);
+  const frames = [];
+  let gce = null;
+  while (p < bytes.length) {
+    const b = bytes[p++];
+    if (b === 0x3b) break;
+    if (b === 0x21) {
+      const label = bytes[p++];
+      if (label === 0xf9) {
+        p++; const packed2 = bytes[p++];
+        gce = { disposal: (packed2 >> 2) & 7, transparent: !!(packed2 & 1) };
+        gce.delay = bytes[p] | (bytes[p + 1] << 8); p += 2;
+        gce.tIdx = bytes[p++]; p++; // block terminator
+      } else {
+        let size = bytes[p++]; while (size) { p += size; size = bytes[p++]; }
+      }
+      continue;
+    }
+    if (b === 0x2c) {
+      u16(); u16(); const iw = u16(); const ih = u16(); u8();
+      const minCode = bytes[p++];
+      const data = []; let size = bytes[p++];
+      while (size) { for (let i = 0; i < size; i++) data.push(bytes[p++]); size = bytes[p++]; }
+      frames.push({ gce, minCode, data, iw, ih });
+      continue;
+    }
+    throw new Error(`unexpected GIF block 0x${b.toString(16)}`);
+  }
+  return { sig, w, h, gct, frames };
+}
+
+describe('GIF 编码（LZW 对拍）', () => {
+  it('lzwEncode / lzwDecode 往返一致', () => {
+    const idx = new Uint8Array([0, 1, 2, 3, 3, 2, 1, 0, 1, 1, 2, 2, 3, 3, 0, 0, 4, 4, 4, 1, 2]);
+    const enc = lzwEncode(idx, 3);
+    deepEq([...lzwDecode(3, enc)], [...idx]);
+  });
+
+  it('长序列 LZW 往返一致（触发码长增长）', () => {
+    const idx = new Uint8Array(2000);
+    for (let i = 0; i < idx.length; i++) idx[i] = (i * 7 + (i >> 3)) % 16;
+    const enc = lzwEncode(idx, 4);
+    deepEq([...lzwDecode(4, enc)], [...idx]);
+  });
+
+  it('encodeGIF 结构正确且像素索引可解码', () => {
+    const palette = Palette.from('pico8').colors;
+    const f0 = new Uint8ClampedArray(4 * 4 * 4);
+    const f1 = new Uint8ClampedArray(4 * 4 * 4);
+    for (let i = 0; i < 16; i++) {
+      f0[i * 4] = 255; f0[i * 4 + 3] = 255;             // 红
+      f1[i * 4 + 2] = 255; f1[i * 4 + 3] = 255;         // 蓝
+    }
+    const gif = encodeGIF([f0, f1], { width: 4, height: 4, palette, delays: [100, 200] });
+    const parsed = parseGIF(gif);
+    eq(parsed.sig, 'GIF89a');
+    eq(parsed.w, 4);
+    eq(parsed.h, 4);
+    eq(parsed.frames.length, 2);
+    eq(parsed.frames[0].gce.delay, 10, '100ms → 10 厘秒');
+    eq(parsed.frames[1].gce.delay, 20);
+    eq(parsed.frames[0].gce.transparent, true);
+    // 解码第一帧索引，应与 quantizeFrame 一致
+    const transp = parsed.frames[0].gce.tIdx;
+    const expected = quantizeFrame(f0, palette.filter((c) => c.a !== 0).slice(0, 255), transp);
+    deepEq(lzwDecode(parsed.frames[0].minCode, parsed.frames[0].data), [...expected]);
+  });
+
+  it('透明像素映射到透明索引', () => {
+    const palette = Palette.from('pico8').colors;
+    const f = new Uint8ClampedArray(2 * 1 * 4);
+    f[0] = 255; f[3] = 255;                 // 第一个不透明红
+    // 第二个透明
+    const gif = encodeGIF([f], { width: 2, height: 1, palette });
+    const parsed = parseGIF(gif);
+    const tIdx = parsed.frames[0].gce.tIdx;
+    const idx = lzwDecode(parsed.frames[0].minCode, parsed.frames[0].data);
+    eq(idx[1], tIdx, '透明像素应为透明索引');
+  });
+});
+
+describe('Aseprite 写出器', () => {
+  const makeFrames = (n) => Array.from({ length: n }, (_, f) => {
+    const d = new Uint8ClampedArray(4 * 4 * 4);
+    for (let i = 0; i < 16; i++) { d[i * 4 + (f % 3)] = 255; d[i * 4 + 3] = 255; }
+    return d;
+  });
+
+  it('头部字段与文件尺寸自洽', () => {
+    const bytes = encodeAseprite(4, 4, makeFrames(3), { layerName: 'Body', durations: [100, 100, 100] });
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    eq(dv.getUint16(4, true), 0xa5e0, 'magic');
+    eq(dv.getUint16(6, true), 3, '帧数');
+    eq(dv.getUint16(8, true), 4, '宽');
+    eq(dv.getUint16(10, true), 4, '高');
+    eq(dv.getUint16(12, true), 32, '色深 RGBA');
+    eq(dv.getUint32(0, true), bytes.length, '文件大小应自洽');
+    eq(dv.getUint16(128 + 4, true), 0xf1fa, '帧魔数');
+    eq(dv.getUint32(128 + 12, true), 2, '第 0 帧含图层 + cel 两个 chunk');
+  });
+
+  it('单帧也能编码', () => {
+    const bytes = encodeAseprite(2, 2, makeFrames(1));
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    eq(dv.getUint16(6, true), 1);
+  });
+});
+
+describe('动画帧模型（Animation）', () => {
+  const red = { r: 255, g: 0, b: 0, a: 255 };
+  const blue = { r: 0, g: 160, b: 255, a: 255 };
+
+  it('capture / duplicate / 逐帧内容独立', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation({ fps: 10 });
+    a.capture(d, true);
+    a.duplicate(d);                       // 复制红帧，文档切到新帧
+    d.activeLayer.buffer.clear(blue);
+    d.invalidate();
+    a.capture(d);                          // 保存蓝帧
+    eq(a.length, 2);
+    eq(a.frameBuffer(0).get(0, 0).r, 255, '第 0 帧应为红');
+    eq(a.frameBuffer(1).get(0, 0).b, 255, '第 1 帧应为蓝');
+  });
+
+  it('select 往返切换文档内容', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation({ fps: 10 });
+    a.capture(d, true);
+    a.duplicate(d);
+    d.activeLayer.buffer.clear(blue); d.invalidate();
+    a.capture(d);
+    a.select(d, 0);
+    eq(d.activeLayer.buffer.get(0, 0).r, 255);
+    a.select(d, 1);
+    eq(d.activeLayer.buffer.get(0, 0).b, 255);
+  });
+
+  it('insertBlank / remove / move', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation();
+    a.capture(d, true);
+    a.insertBlank(d);
+    eq(a.length, 2);
+    eq(a.frameBuffer(1).opaqueCount(), 0);
+    a.move(1, 0);
+    eq(a.current, 0);
+    a.remove(0);
+    eq(a.length, 1);
+    eq(a.remove(0), false, '最后一帧不可删除');
+  });
+
+  it('spritesheet 布局正确', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation();
+    a.capture(d, true);
+    a.duplicate(d);
+    d.activeLayer.buffer.clear(blue); d.invalidate();
+    a.capture(d);
+    const ss = a.toSpritesheet({ columns: 2 });
+    eq(ss.width, 16);
+    eq(ss.height, 8);
+    eq(ss.count, 2);
+    eq(ss.data[0], 255, '左上为红');
+    const i = (0 * 16 + 8) * 4;
+    eq(ss.data[i + 2], 255, '右上为蓝');
+  });
+
+  it('toGIF / toAseprite 可产出且 JSON 往返', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation({ fps: 12, loop: 0 });
+    a.capture(d, true);
+    a.duplicate(d);
+    d.activeLayer.buffer.clear(blue); d.invalidate();
+    a.capture(d);
+    const gif = a.toGIF(Palette.from('pico8').colors);
+    eq(String.fromCharCode(...gif.slice(0, 6)), 'GIF89a');
+    eq(parseGIF(gif).frames.length, 2);
+    const ase = a.toAseprite('Body');
+    eq(new DataView(ase.buffer, ase.byteOffset).getUint16(6, true), 2);
+    const back = Animation.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    eq(back.length, 2);
+    eq(back.fps, 12);
+    eq(back.frameBuffer(1).get(0, 0).b, 255);
+  });
+});
+
+/* ═══════════════ 12.13 参考图引导与多帧生成（v1.6） ═══════════════ */
+
+describe('参考图引导与多帧生成', () => {
+  it('referenceDataURL 提取参考层 PNG', () => {
+    const d = new PixelDocument(8, 8);
+    const ref = new Layer(8, 8, '参考图');
+    ref.kind = 'reference';
+    ref.buffer.clear({ r: 10, g: 20, b: 30, a: 255 });
+    d.layers.unshift(ref);
+    const a = new Agent({ provider: {}, renderer: {}, doc: d, history: null });
+    const url = a.referenceDataURL();
+    assert(url && url.startsWith('data:image/png;base64,'), '应返回 PNG dataURL');
+    const a2 = new Agent({ provider: {}, renderer: {}, doc: new PixelDocument(8, 8), history: null });
+    eq(a2.referenceDataURL(), null, '无参考层应返回 null');
+  });
+
+  it('参考层在预览合成中可见，但不被烘焙进渲染底图', () => {
+    const d = new PixelDocument(8, 8);
+    const ref = new Layer(8, 8, '参考图');
+    ref.kind = 'reference';
+    ref.buffer.fillRect(0, 0, 8, 8, { r: 200, g: 100, b: 50, a: 255 }, false);
+    d.layers.unshift(ref);
+    assert(d.composite().opaqueCount() === 64, '参考层应参与预览合成（用户可见）');
+    eq(d.compositeBase().opaqueCount(), 0, '参考层不应进入渲染底图');
+  });
+
+  it('_frameBrief 单帧不变、多帧带帧号', () => {
+    const a = new Agent({ provider: {}, renderer: {}, doc: new PixelDocument(8, 8) });
+    eq(a._frameBrief('画树', 0, 1), '画树');
+    const multi = a._frameBrief('画树', 1, 3);
+    assert(multi.includes('2/3'), `应包含帧号：${multi}`);
+    assert(multi.includes('上一帧'), '应提示基于上一帧');
+  });
+
+  it('frameCount 规范化到 1..64', () => {
+    eq(new Agent({ provider: {}, renderer: {}, doc: new PixelDocument(4, 4), frameCount: 0 }).frameCount, 1);
+    eq(new Agent({ provider: {}, renderer: {}, doc: new PixelDocument(4, 4), frameCount: 200 }).frameCount, 64);
+  });
+});
+
 /* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
 
 async function runIntegration() {
@@ -1383,6 +2073,109 @@ async function runIntegration() {
   check('演示模式同样触发视觉回灌（image_url）', () => {
     // 演示 Provider 忽略消息，但 Agent 仍应构造图像消息 —— 通过轮次 2 的 mode=append 间接验证
     eq(demoRounds[1].mode, 'append');
+  });
+
+  // 风格 → 渲染后端闭环（无神经后端时走程序化先验，写入残差层）
+  group = '端到端 · 风格渲染后端';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const styleDoc = new Doc(32, 32);
+  styleDoc.style = 'photo';
+  const styleEvents = [];
+  const styleAgent = new Agent({
+    provider: new DemoProvider({ width: 32, height: 32 }),
+    renderer, doc: styleDoc, history: new Hist(styleDoc),
+    maxIterations: 2, visionLongEdge: 128, neuralAvailable: false,
+    onEvent: (e) => styleEvents.push(e),
+  });
+  let styleRounds = [];
+  try {
+    styleRounds = await styleAgent.run('画一个写实的史莱姆');
+  } catch (err) {
+    failures.push({ group, name: '风格闭环', err });
+  }
+  check('非 pixel 风格创建神经残差层并渲染', () => {
+    const nl = styleDoc.neuralLayer;
+    assert(nl, '应创建神经残差层');
+    assert(nl.buffer.opaqueCount() > 100, `残差层内容过少：${nl ? nl.buffer.opaqueCount() : 0}`);
+    assert(styleRounds.some((r) => r.render && r.render.backend === 'procedural'), '应记录程序化后端');
+  });
+  check('残差层参与最终合成', () => {
+    assert(styleDoc.composite().opaqueCount() > 100, '合成结果应有内容');
+    assert(styleDoc.compositeBase().opaqueCount() > 100, '程序底图应有内容');
+  });
+
+  // 局部重绘（无神经后端时的程序化降级路径）
+  group = '端到端 · 局部重绘';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const inpaintDoc = new Doc(32, 32);
+  runScript('bg c4\ncircle 16 16 10 c9 fill\ncircle 16 16 8 c10 fill', inpaintDoc, { mode: 'replace' });
+  inpaintDoc.style = 'painting';
+  const inpaintAgent = new Agent({ provider: {}, renderer, doc: inpaintDoc, history: new Hist(inpaintDoc), neuralAvailable: false });
+  let inpaintResult = null;
+  try {
+    inpaintResult = await inpaintAgent.inpaintRegion({ x: 8, y: 8, w: 16, h: 16, prompt: '细节', strength: 0.5 });
+  } catch (err) {
+    failures.push({ group, name: 'inpaintRegion', err });
+  }
+  check('局部重绘写入残差层且只影响目标区域', () => {
+    assert(inpaintResult && inpaintResult.task === 'inpaint', '应返回 inpaint 结果');
+    const nl = inpaintDoc.neuralLayer;
+    assert(nl, '应创建神经残差层');
+    assert(nl.buffer.opaqueCount() > 50, `区域内容过少：${nl ? nl.buffer.opaqueCount() : 0}`);
+    eq(nl.buffer.get(1, 1).a, 0, '区域外不应被写入');
+  });
+
+  // 多帧生成（DemoProvider + Animation）
+  group = '端到端 · 多帧生成';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const { Animation: Anim } = await import('../public/js/core/animation.js');
+  const mfDoc = new Doc(32, 32);
+  const mfAnim = new Anim({ fps: 8 });
+  mfAnim.capture(mfDoc, true);
+  const mfEvents = [];
+  const mfAgent = new Agent({
+    provider: new DemoProvider({ width: 32, height: 32 }),
+    renderer, doc: mfDoc, history: new Hist(mfDoc),
+    maxIterations: 2, visionLongEdge: 128, frameCount: 3, animation: mfAnim,
+    onEvent: (e) => mfEvents.push(e),
+  });
+  let mfRounds = [];
+  try {
+    mfRounds = await mfAgent.run('走路循环');
+  } catch (err) {
+    failures.push({ group, name: '多帧生成', err });
+  }
+  check('多帧生成产生 N 帧且带 frame 字段', () => {
+    eq(mfAnim.length, 3, `帧数 ${mfAnim.length}`);
+    assert(mfRounds.length >= 3, `轮次过少 ${mfRounds.length}`);
+    assert(mfRounds.some((r) => r.frame === 2), '应包含第 3 帧记录');
+    assert(mfEvents.some((e) => e.type === 'frame' && e.frame === 2), '应有 frame 事件');
+  });
+  check('帧之间数据独立（深拷贝）', () => {
+    assert(mfAnim.frameBuffer(0).data !== mfAnim.frameBuffer(1).data, '帧数据不应共享引用');
+  });
+
+  // 神经请求体（task / mask / reference）
+  group = '端到端 · 神经请求封装';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const { requestNeural } = await import('../public/js/core/backends.js');
+  const origFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (url, init) => {
+    captured = { url, body: JSON.parse(init.body) };
+    return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ image: 'data:image/png;base64,AAA' }) };
+  };
+  let nn = null;
+  try {
+    nn = await requestNeural({ task: 'inpaint', image: 'i', mask: 'm', reference: 'r', prompt: 'p' });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  check('requestNeural 正确封装 task / mask / reference', () => {
+    assert(nn && nn.task === 'inpaint', '应返回任务信息');
+    eq(captured.body.task, 'inpaint');
+    eq(captured.body.mask, 'm');
+    eq(captured.body.reference, 'r');
   });
 
   // 中止测试

@@ -21,6 +21,13 @@ export class Layer {
     this.visible = true;
     this.opacity = 1;
     this.locked = false;
+    /**
+     * 'raster' 普通绘制层；'neural' 神经/程序化渲染层（作为高熵残差叠加在程序层之上）。
+     * @type {'raster'|'neural'}
+     */
+    this.kind = 'raster';
+    /** @type {null|{backend?:string, prompt?:string, strength?:number, style?:string, seed?:number}} */
+    this.meta = null;
   }
 
   clone() {
@@ -31,6 +38,8 @@ export class Layer {
     l.visible = this.visible;
     l.opacity = this.opacity;
     l.locked = this.locked;
+    l.kind = this.kind;
+    l.meta = this.meta ? { ...this.meta } : null;
     return l;
   }
 }
@@ -46,10 +55,33 @@ export class PixelDocument {
     this.symmetry = 'off';
     this.seed = null;
     this.title = '未命名';
+    /** 作品风格：pixel / painting / ink / anime / 3d / photo —— 决定渲染后端 */
+    this.style = 'pixel';
+    /** 方向光声明列表（由 DSL 的 light 指令追加） */
+    this.lights = [];
+    /** 最近一次 DSL render 请求的风格（供闭环选择后端） */
+    this.renderRequested = null;
+    /** 本轮的局部重绘请求（由 DSL inpaint 追加，Agent 消费后清空） */
+    this.inpaintRequests = [];
     this._composite = null;
+    this._compositeBase = null;
   }
 
   get activeLayer() { return this.layers[this.activeLayerIndex]; }
+
+  /** 找到（或按需创建）神经/渲染残差层 —— 始终位于最上层。 */
+  ensureNeuralLayer(name = '渲染层') {
+    let l = this.layers.find((x) => x.kind === 'neural');
+    if (!l) {
+      l = new Layer(this.width, this.height, name);
+      l.kind = 'neural';
+      this.layers.push(l);
+      this.invalidate();
+    }
+    return l;
+  }
+
+  get neuralLayer() { return this.layers.find((x) => x.kind === 'neural') || null; }
 
   /** 尺寸变更：重建所有图层并尽力保留内容 */
   resize(width, height) {
@@ -67,13 +99,17 @@ export class PixelDocument {
     this.invalidate();
   }
 
-  invalidate() { this._composite = null; }
+  invalidate() { this._composite = null; this._compositeBase = null; }
 
-  /** @returns {PixelBuffer} */
-  composite() {
-    if (this._composite) return this._composite;
+  /**
+   * 底层合成。
+   * @param {Set<string>|null} skipKinds 跳过的图层类型（如神经残差层 / 参考图）
+   * @returns {PixelBuffer}
+   */
+  _compose(skipKinds) {
     const out = new PixelBuffer(this.width, this.height);
     for (const layer of this.layers) {
+      if (skipKinds && skipKinds.has(layer.kind)) continue;
       if (!layer.visible || layer.opacity <= 0) continue;
       const b = layer.buffer;
       const op = layer.opacity;
@@ -92,8 +128,22 @@ export class PixelDocument {
         }
       }
     }
-    this._composite = out;
     return out;
+  }
+
+  /** @returns {PixelBuffer} */
+  composite() {
+    if (!this._composite) this._composite = this._compose(null);
+    return this._composite;
+  }
+
+  /**
+   * 仅绘制/程序层——不含神经残差层，也不含参考图（参考图仅作神经引导，不参与成图）。
+   * 供渲染管线作底图。
+   */
+  compositeBase() {
+    if (!this._compositeBase) this._compositeBase = this._compose(new Set(['neural', 'reference']));
+    return this._compositeBase;
   }
 
   /** @param {string} name @returns {Layer} */
@@ -168,11 +218,15 @@ export class PixelDocument {
       title: this.title,
       symmetry: this.symmetry,
       seed: this.seed,
+      style: this.style,
+      lights: this.lights,
       palette: this.palette.toJSON(),
       layers: this.layers.map((l) => ({
         name: l.name,
         visible: l.visible,
         opacity: l.opacity,
+        kind: l.kind,
+        meta: l.meta,
         data: bytesToHex(l.buffer.data),
       })),
     };
@@ -184,11 +238,15 @@ export class PixelDocument {
     doc.title = json.title ?? '未命名';
     doc.symmetry = json.symmetry ?? 'off';
     doc.seed = json.seed ?? null;
+    doc.style = json.style ?? 'pixel';
+    doc.lights = Array.isArray(json.lights) ? json.lights : [];
     doc.palette = Palette.from(json.palette?.hex ?? 'pico8');
     doc.layers = (json.layers ?? []).map((lj) => {
       const l = new Layer(json.width, json.height, lj.name);
       l.visible = lj.visible !== false;
       l.opacity = lj.opacity ?? 1;
+      if (lj.kind === 'neural') l.kind = 'neural';
+      if (lj.meta) l.meta = lj.meta;
       const hex = lj.data ?? '';
       for (let i = 0; i < l.buffer.data.length && i * 2 < hex.length; i++) {
         l.buffer.data[i] = parseInt(hex.substr(i * 2, 2), 16);

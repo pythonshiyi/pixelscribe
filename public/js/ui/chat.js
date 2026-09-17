@@ -62,6 +62,7 @@ export class ChatPanel {
       model: this.app.settings.model || cfg.model,
       temperature: this.app.settings.temperature ?? cfg.temperature,
       thinking: this.app.settings.thinking ?? cfg.thinking ?? 'auto',
+      visionDetail: this.app.settings.visionDetail ?? cfg.visionDetail ?? 'high',
       maxTokens: this.app.settings.maxTokens ?? cfg.maxTokens ?? 2048,
       proxy: !direct,
       timeoutMs: 180000,
@@ -81,6 +82,12 @@ export class ChatPanel {
       this.app.afterEdit(true);
     }
 
+    /* 应用目标风格 */
+    const style = $('#aiStyle')?.value;
+    if (style) this.app.doc.style = style;
+
+    const frameCount = Math.max(1, Math.min(24, Number($('#aiFrames')?.value) || 1));
+
     this.resetLog();
     this.disabled(true);
     this.setStatus('正在生成…', 'busy');
@@ -98,9 +105,30 @@ export class ChatPanel {
       incremental: $('#aiIncremental').checked,
       vision: this.app.settings.vision ?? this.app.config.vision ?? 'auto',
       maxTokens: this.app.settings.maxTokens ?? this.app.config.maxTokens ?? 2048,
+      visionDetail: this.app.settings.visionDetail ?? this.app.config.visionDetail ?? 'high',
+      plan: $('#aiPlan')?.checked === true,
+      neuralAvailable: Boolean(this.app.config.neuralRender),
+      neuralPrompt: brief,
+      frameCount,
+      animation: this.app.animation,
       onEvent: (e) => this.onEvent(e, isDemo),
     });
 
+    this._liveCardLabel = '模型生成中';
+    this._newLiveCard();
+
+    try {
+      await this.agent.run(brief);
+    } finally {
+      this.disabled(false);
+      this.app.refreshLayers();
+      this.app.syncFrames?.();
+      this.app.requestRender();
+    }
+  }
+
+  /** 新建一个“生成中”的轮次占位卡片（多帧时每帧一张）。 */
+  _newLiveCard() {
     this.thinkingEl = el('div', { class: 'thinking collapsed' });
     this.reasonBody = el('div', { class: 'reason-body' });
     this.reasonEl = el('div', { class: 'reason hidden' }, [
@@ -111,20 +139,13 @@ export class ChatPanel {
     const card = el('div', { class: 'round' }, [
       el('div', { class: 'round-head' }, [
         el('span', { class: 'round-no', text: '···' }),
-        el('span', { text: '模型生成中' }),
+        el('span', { text: this._liveCardLabel || '模型生成中' }),
       ]),
       el('div', { class: 'round-body' }, [this.reasonEl, this.thinkingEl]),
     ]);
     this.log.prepend(card);
     this._liveCard = card;
-
-    try {
-      await this.agent.run(brief);
-    } finally {
-      this.disabled(false);
-      this.app.refreshLayers();
-      this.app.requestRender();
-    }
+    return card;
   }
 
   onEvent(e, isDemo) {
@@ -146,6 +167,11 @@ export class ChatPanel {
 
       case 'usage':
         this._lastUsage = e.usage;
+        break;
+
+      case 'frame':
+        if (e.frame > 0) this._newLiveCard();
+        this.setStatus(`帧 ${e.frame + 1}/${e.frameTotal} · 模型生成中…`, 'busy');
         break;
 
       case 'phase':
@@ -193,10 +219,13 @@ export class ChatPanel {
     const report = it.report;
     const ok = report.errors.length === 0;
 
+    const backendLabel = it.render ? { neural: '神经渲染', procedural: '程序化', raster: '栅格' }[it.render.backend] : '';
     const head = el('div', { class: 'round-head' }, [
       el('span', { class: 'round-no', text: `#${it.index + 1}` }),
+      it.frameTotal > 1 ? el('span', { class: 'round-mode', text: `帧 ${it.frame + 1}/${it.frameTotal}` }) : null,
       el('span', { class: 'round-mode', text: it.mode === 'replace' ? '整幅' : '增量' }),
       el('span', { text: `改动 ${report.changed} px · ${report.ops} 条指令 · ${report.elapsedMs}ms` }),
+      ...(backendLabel ? [el('span', { class: 'round-mode', text: backendLabel })] : []),
       el('span', { class: 'round-stat', html: `第 <b>${total}</b>/${this.app.settings.maxIterations || 6} 轮` }),
     ]);
 
@@ -246,8 +275,13 @@ export class ChatPanel {
       el('div', { class: 'round-body' }, [thumb, info]),
     ]);
 
-    this._liveCard?.replaceWith(card);
-    this._liveCard = null;
+    if (this._liveCard) {
+      this._liveCard.replaceWith(card);
+      this._liveCard = null;
+    } else {
+      // 修复：后续轮次/帧的卡片此前未被插入 DOM，导致只显示最后一轮
+      this.log.append(card);
+    }
     this.thinkingEl = null;
     this.rounds.push(it);
     if (isDemo && this.rounds.length === 1) {

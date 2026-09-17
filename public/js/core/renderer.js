@@ -7,6 +7,7 @@
  */
 
 import { encodePNG, encodePNGScaled, toBase64 } from '../io/png.js';
+import { controlMaps as buildControlMaps, controlMapDataURL, bufferDataURL } from './backends.js';
 
 /** 与 UI 主题配套的画布配色（棋盘底 / 网格 / 边框 / 对称轴）。 */
 const THEMES = {
@@ -47,6 +48,9 @@ export class Renderer {
     this.showSymmetry = true;
     /** @type {import('./buffer.js').PixelBuffer|null} 预览覆盖层 */
     this.overlay = null;
+    /** @type {{prev:import('./buffer.js').PixelBuffer|null, next:import('./buffer.js').PixelBuffer|null}|null} 洋葱皮 */
+    this.onion = null;
+    this._onionCanvas = document.createElement('canvas');
     /** @type {{x:number,y:number,w:number,h:number}|null} */
     this.selection = null;
     /** @type {{x:number,y:number}|null} */
@@ -197,6 +201,20 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
 
+    if (this.onion && (this.onion.prev || this.onion.next)) {
+      const oc = this._onionCanvas;
+      if (oc.width !== doc.width || oc.height !== doc.height) { oc.width = doc.width; oc.height = doc.height; }
+      const octx = oc.getContext('2d');
+      ctx.globalAlpha = 0.5;
+      for (const buf of [this.onion.prev, this.onion.next]) {
+        if (!buf) continue;
+        octx.clearRect(0, 0, oc.width, oc.height);
+        octx.putImageData(buf.toImageData(), 0, 0);
+        ctx.drawImage(oc, ox, oy, w, h);
+      }
+      ctx.globalAlpha = 1;
+    }
+
     if (this.grid && this.scale >= 5) {
       ctx.lineWidth = 1;
       for (let x = 0; x <= doc.width; x++) {
@@ -303,6 +321,27 @@ export class Renderer {
   /** 供视觉回灌使用：放大到长边 longEdge，不垫底色（保留透明） */
   visionDataURL(longEdge = 384) {
     return this.export(longEdge, false).dataURL;
+  }
+
+  /**
+   * 合成结果的原生尺寸 PNG（供神经后端作 img2img 底图）。
+   * @param {number} [longEdge] 0 表示不放大
+   */
+  bufferDataURL(longEdge = 0) {
+    return bufferDataURL(this.doc.composite(), longEdge);
+  }
+
+  /**
+   * 导出控制图（边缘 / 深度 / 法线 / 遮罩）——神经后端的条件输入。
+   * @param {'edges'|'depth'|'normal'|'alpha'} [kind]
+   */
+  controlMap(kind = 'edges', longEdge = 512) {
+    return controlMapDataURL(this.doc.composite(), kind, longEdge);
+  }
+
+  /** 一次性导出全部控制图。 */
+  controlMaps(longEdge = 512) {
+    return buildControlMaps(this.doc.composite(), longEdge);
   }
 
   download(filename, longEdge = 512, withBackground = false) {

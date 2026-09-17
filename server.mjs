@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const VERSION = '1.2.0';
+const VERSION = '1.6.0';
 
 /* ───────────────────────── .env 加载 ───────────────────────── */
 
@@ -82,6 +82,23 @@ function isOfficialEndpoint(baseUrl) {
 }
 
 /**
+ * 是否 DeepSeek Vision 系列（deepseek-flash / 旧 deepseek-v4-flash-vision-exp）。
+ * 原生多模态，但接收 `thinking` 字段会返回 400。
+ */
+function isDeepseekFlashModel(model) {
+  return /deepseek.*(flash|vision)/i.test(String(model || ''));
+}
+
+/** 视觉消息只能出现在 user 角色（DeepSeek 规定）——防御性清洗。 */
+function sanitizeMessages(messages) {
+  return (messages || []).map((m) => {
+    if (!Array.isArray(m?.content) || m.role === 'user') return m;
+    const text = m.content.filter((p) => p?.type === 'text').map((p) => p.text).join('\n');
+    return { ...m, content: text };
+  });
+}
+
+/**
  * 复用鲸语 WhaleTalk 的网关配置（可选）。
  * WhaleTalk 的 `config.json` 里 `base_url` / `model` 是明文，可复用；
  * `api_key` 经 Windows DPAPI 加密，Node 端无法解密——只在看起来是明文
@@ -104,9 +121,9 @@ const GW = readGatewayConfig();
 
 const CFG = {
   port: Number(process.env.PX_PORT || 5173),
-  baseUrl: normalizeBaseUrl(process.env.PX_BASE_URL || GW.baseUrl || 'https://opencode.ai/zen/go/v1'),
+  baseUrl: normalizeBaseUrl(process.env.PX_BASE_URL || GW.baseUrl || 'https://api.deepseek.com'),
   apiKey: process.env.PX_API_KEY || GW.apiKey || '',
-  model: process.env.PX_MODEL || GW.model || 'deepseek-v4.1-flash',
+  model: process.env.PX_MODEL || GW.model || 'deepseek-flash',
   temperature: Number(process.env.PX_TEMPERATURE || 0.6),
   maxIterations: Number(process.env.PX_MAX_ITERATIONS || 6),
   visionLongEdge: Number(process.env.PX_VISION_LONG_EDGE || 384),
@@ -116,11 +133,26 @@ const CFG = {
   // disabled / enabled：强制。
   thinking: String(process.env.PX_THINKING || 'auto').toLowerCase(),
   vision: String(process.env.PX_VISION || 'auto').toLowerCase(),
+  // DeepSeek Vision 细节级别：low / high / original / auto
+  visionDetail: String(process.env.PX_VISION_DETAIL || 'high').toLowerCase(),
+  // 可选神经渲染后端（img2img / ControlNet）。留空则只用程序化先验。
+  renderUrl: String(process.env.PX_RENDER_URL || '').trim(),
+  renderKey: String(process.env.PX_RENDER_KEY || '').trim(),
+  // 多后端路由：缺省回退到 renderUrl
+  inpaintUrl: String(process.env.PX_INPAINT_URL || '').trim(),
+  upscaleUrl: String(process.env.PX_UPSCALE_URL || '').trim(),
 };
+
+/** 按任务选择神经后端 URL（缺省回退到通用 renderUrl）。 */
+function renderUrlForTask(task) {
+  if (task === 'inpaint') return CFG.inpaintUrl || CFG.renderUrl;
+  if (task === 'upscale') return CFG.upscaleUrl || CFG.renderUrl;
+  return CFG.renderUrl;
+}
 
 // 不透明、按进程稳定：同一会话路由到同一后端，提升缓存命中（官方文档要求）。
 const OPENCODE_SESSION = crypto.randomUUID();
-const USER_AGENT = 'PixelScribe/1.1 (+https://github.com/pythonshiyi/pixelscribe)';
+const USER_AGENT = 'PixelScribe/1.6 (+https://github.com/pythonshiyi/pixelscribe)';
 
 /** 按端点返回需注入的默认请求头（仅 opencode.ai 需要会话头）。 */
 function gatewayHeaders(baseUrl) {
@@ -133,7 +165,11 @@ function gatewayHeaders(baseUrl) {
 }
 
 /** 解析 thinking 策略 → 要下发的 extra body 字段（无则 null）。 */
-function thinkingBody(baseUrl, mode) {
+function thinkingBody(baseUrl, mode, model) {
+  // DeepSeek Vision 系列不接受 thinking 字段
+  if (isDeepseekFlashModel(model)) {
+    return mode === 'enabled' ? { type: 'enabled' } : null;
+  }
   const known = isOfficialEndpoint(baseUrl) || isOpencodeEndpoint(baseUrl);
   if (mode === 'enabled') return { type: 'enabled' };
   if (mode === 'disabled') return { type: 'disabled' };
@@ -154,7 +190,8 @@ const MIME = {
   '.pxs': 'text/plain; charset=utf-8',
 };
 
-const MAX_BODY = 8 * 1024 * 1024;
+// 神经渲染请求可能同时携带底图 + 4 张控制图 + 蒙版 + 参考图，故上限放宽
+const MAX_BODY = 32 * 1024 * 1024;
 
 /* ───────────────────────── 作品库（专门的文件空间） ───────────────────────── */
 // 生成物自动落盘到 <repo>/workspace/gallery，便于集中查看/管理；路径可用 PX_WORKSPACE 覆盖。
@@ -283,15 +320,16 @@ function providerHeaders(baseUrl, hasKey) {
 }
 
 function buildUpstreamBody(payload, baseUrl, { withThinking }) {
+  const model = payload.model || CFG.model;
   const body = {
-    model: payload.model || CFG.model,
-    messages: payload.messages || [],
+    model,
+    messages: sanitizeMessages(payload.messages || []),
     temperature: payload.temperature ?? CFG.temperature,
     stream: payload.stream !== false,
   };
   let maxTokens = payload.max_tokens ?? CFG.maxTokens;
   let thinking = null;
-  if (withThinking) thinking = thinkingBody(baseUrl, CFG.thinking);
+  if (withThinking) thinking = thinkingBody(baseUrl, CFG.thinking, model);
   if (thinking) body.thinking = thinking;
   // 开思考时 reasoning 也占 completion 预算，下限抬到 8192，避免 content 被挤空
   if (thinking?.type === 'enabled' && maxTokens && maxTokens < 8192) maxTokens = 8192;
@@ -335,7 +373,7 @@ async function handleChat(req, res) {
     payload = JSON.parse(await readBody(req));
   } catch (err) {
     return sendJSON(res, err.message === 'PAYLOAD_TOO_LARGE' ? 413 : 400, {
-      error: err.message === 'PAYLOAD_TOO_LARGE' ? '请求体过大（上限 8MB）' : '请求体不是合法 JSON',
+      error: err.message === 'PAYLOAD_TOO_LARGE' ? '请求体过大（上限 32MB）' : '请求体不是合法 JSON',
     });
   }
 
@@ -408,6 +446,48 @@ async function handleChat(req, res) {
   }
 }
 
+/**
+ * /api/render —— 可选神经渲染后端代理（img2img / ControlNet）。
+ * 未配置 PX_RENDER_URL 时返回 501，前端自动降级为程序化渲染。
+ * 请求体：{ image, controls?, prompt?, style?, strength?, seed?, width?, height? }
+ */
+async function handleRender(req, res) {
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (err) {
+    return sendJSON(res, err.message === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: 'BAD_REQUEST' });
+  }
+  const task = ['img2img', 'inpaint', 'upscale'].includes(payload.task) ? payload.task : 'img2img';
+  const url = renderUrlForTask(task);
+  if (!url) {
+    return sendJSON(res, 501, {
+      error: 'NO_RENDER_BACKEND',
+      message: `未配置 ${task === 'inpaint' ? 'PX_INPAINT_URL / ' : task === 'upscale' ? 'PX_UPSCALE_URL / ' : ''}PX_RENDER_URL，神经渲染不可用；已使用程序化渲染管线。`,
+    });
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CFG.timeoutMs);
+  req.on('close', () => controller.abort());
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (CFG.renderKey) headers.Authorization = `Bearer ${CFG.renderKey}`;
+    const upstream = await fetch(url, {
+      method: 'POST', headers, body: JSON.stringify(payload), signal: controller.signal,
+    });
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    const ct = upstream.headers.get('content-type') || 'application/json; charset=utf-8';
+    send(res, upstream.status, buf, { 'Content-Type': ct });
+  } catch (err) {
+    sendJSON(res, 502, {
+      error: 'RENDER_UNREACHABLE',
+      message: `无法连接渲染后端 ${url}：${err.message}`,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -420,9 +500,17 @@ const server = http.createServer(async (req, res) => {
       temperature: CFG.temperature,
       maxIterations: CFG.maxIterations,
       visionLongEdge: CFG.visionLongEdge,
+      visionDetail: CFG.visionDetail,
       maxTokens: CFG.maxTokens,
       thinking: CFG.thinking,
       vision: CFG.vision,
+      neuralRender: Boolean(CFG.renderUrl || CFG.inpaintUrl || CFG.upscaleUrl),
+      renderUrlConfigured: Boolean(CFG.renderUrl),
+      renderTasks: {
+        img2img: Boolean(CFG.renderUrl),
+        inpaint: Boolean(CFG.inpaintUrl || CFG.renderUrl),
+        upscale: Boolean(CFG.upscaleUrl || CFG.renderUrl),
+      },
       provider: isOpencodeEndpoint(CFG.baseUrl) ? 'opencode' : (isOfficialEndpoint(CFG.baseUrl) ? 'deepseek' : 'openai-compatible'),
       gateway: { opencode: isOpencodeEndpoint(CFG.baseUrl), official: isOfficialEndpoint(CFG.baseUrl) },
       workspace: WORKSPACE_DIR,
@@ -435,6 +523,11 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/chat') {
     if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
     return handleChat(req, res);
+  }
+
+  if (url.pathname === '/api/render') {
+    if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    return handleRender(req, res);
   }
 
   /* ── 作品库（文件空间） ── */

@@ -3,9 +3,9 @@
 > 让**不具备原生生图能力**的多模态大模型，通过「结构化绘制 + 视觉回灌 + 自我修正」闭环，
 > 产出专业级像素美术作品。
 
-- 版本：`1.2.0`
+- 版本：`1.6.0`
 - 文档状态：定稿
-- 关键词：PixelScript DSL · 视觉闭环 · 像素级可控 · 零构建 Web 应用
+- 关键词：PixelScript DSL · 程序化先验 · 神经渲染 · 视觉闭环 · 像素级可控 · 零构建 Web 应用
 
 ---
 
@@ -126,7 +126,7 @@ Pass 4 (回灌审查)   → 局部 patch
 │  ┌────────────┐   ┌────────────┐   ┌──────────────────────┐  │
 │  │  UI 层      │   │  引擎层     │   │  语言层               │  │
 │  │ toolbar    │──▶│ document   │◀──│  compiler.js         │  │
-│  │ panels     │   │ history    │   │  compiler.js (33 op) │  │
+│  │ panels     │   │ history    │   │  compiler.js (42 op) │  │
 │  │ chat       │   │ renderer   │   │  font5x7             │  │
 │  │ tools      │   │ buffer     │   └──────────────────────┘  │
 │  └────────────┘   │ palette    │              ▲               │
@@ -172,7 +172,7 @@ Pass 4 (回灌审查)   → 局部 patch
 4. **确定性**：随机相关指令（`noise`）必须显式 `seed`。
 5. **颜色三态**：调色板索引 `c3` / 十六进制 `#ff004d` / 语义名 `red`。
 
-### 4.2 指令总表（33 条）
+### 4.2 指令总表（42 条）
 
 #### 指令型（Directive）
 
@@ -534,10 +534,14 @@ async function run(agent) {
 
 | 版本 | 内容 |
 |---|---|
-| v1.0 | 本版本：DSL + 引擎 + 视觉闭环 + Web UI |
+| v1.0 | DSL + 引擎 + 视觉闭环 + Web UI |
 | v1.1 | 图层感知的 AI 增量编辑、脚本 diff 合并、色板提取 |
 | v1.2 | 动画帧序列（spritesheet）、ONION 洋葱皮、GIF/Aseprite 导出 |
-| v1.3 | 局部选区重绘（inpainting 式）、参考图 img2pixel 转换 |
+| **v1.3** | **程序化先验（光照/材质/色调）+ 可选神经后端 + 神经残差层 + 风格一等公民 + DeepSeek Vision 适配 + 区域热区诊断/导演模式** |
+| **v1.4** | **局部重绘（`inpaint` + 选区界面，神经 inpaint / 程序化细化双路径）+ 参考图 img2pixel（面积平均/最近邻 + Floyd/Bayer 抖动 + 边缘增强）+ 神经多后端路由（img2img/inpaint/upscale）** |
+| **v1.5** | **动画帧序列（帧条 CRUD / 播放）+ ONION 洋葱皮 + 精灵表 PNG + GIF89a（自带 LZW）+ Aseprite 导出** |
+| **v1.6** | **多帧 AI 生成（"生成 N 帧循环动画"：逐帧基于上一帧增量修改）+ 参考图引导层（不烘焙进成图，作为 ControlNet 式引导）** |
+| v1.7 | 时间轴缓动曲线、音频/时间轴预览、帧间插值（AI tween） |
 | v2.0 | 多智能体协作（构图师 / 上色师 / 审查师）、SVG 分支后端 |
 
 ---
@@ -548,7 +552,7 @@ async function run(agent) {
 
 `npm run selftest` 覆盖：
 
-1. **语言层**：33 条指令逐条执行不报错；非法输入产出预期错误行号。
+1. **语言层**：42 条指令逐条执行不报错；非法输入产出预期错误行号。
 2. **引擎层**：对称、洪水填充、描边、翻转、旋转的像素级断言。
 3. **导出**：PNG 魔数、尺寸、最近邻放大正确性。
 4. **端到端**：内置范例脚本渲染 → 校验非空像素占比 → 落到 `out/test/`。
@@ -605,15 +609,15 @@ async function run(agent) {
 │        ├─ panels.js         图层 / 色板 / 脚本面板
 │        └─ chat.js           AI 面板与轮次时间线
 └─ test/
-   ├─ selftest.mjs            单元 / 集成自测（158 项）
-   └─ dom-smoke.mjs           jsdom 无头 UI 冒烟测试（55 项）
+   ├─ selftest.mjs            单元 / 集成自测（221 项）
+   └─ dom-smoke.mjs           jsdom 无头 UI 冒烟测试（66 项）
 ```
 
 ## 附录 C：测试矩阵
 
 | 套件 | 命令 | 覆盖 |
 |---|---|---|
-| 单元 / 集成 | `npm run test:unit` | 颜色、调色板、缓冲图元、文档、历史、33 条指令、语法预检、回复解析、PNG 编解码、AI 提示词、字体、端到端范例渲染、**真实 HTTP 视觉闭环**、中止传播 |
+| 单元 / 集成 | `npm run test:unit` | 颜色、调色板、缓冲图元、文档、历史、42 条指令、语法预检、回复解析、PNG 编解码、AI 提示词、字体、端到端范例渲染、**真实 HTTP 视觉闭环**、中止传播 |
 | UI 冒烟 | `npm run test:dom` | jsdom 中真实启动应用：工具栏、对称、缩放、调色板、图层、画布指针绘制、选区、撤销重做、快捷键、脚本运行、模态框、AI 演示闭环、持久化、导出 |
 | 全部 | `npm test` | 上述两者，任一失败即退出非零 |
 
@@ -627,3 +631,135 @@ async function run(agent) {
 | 收敛 | 连续轮次改动像素数低于阈值 |
 | 图元 | line/rect/circle 等高层几何绘制指令 |
 | 整幅 / 增量 | 每轮重画全部 / 只追加改动指令 |
+| 程序化先验 | 无神经依赖的确定性渲染（法线光照/材质/色调） |
+| 神经残差层 | 存放神经/程序化渲染结果的高熵层，独立于可复现的程序层 |
+| 控制图 | 边缘/深度/法线/遮罩，作为神经后端的条件输入 |
+
+---
+
+## 附录 D：v1.3 架构演进 —— 从像素画到写实
+
+### D.1 问题重述
+
+v1.2 的能力上限并非 DSL 表达力不足，而是「用文本程序携带图像信息」的信息论上限：
+像素画/图标的结构熵极低，短程序可复原；照片的高频细节是近随机的高熵残差，
+任何短文本都无法携带。因此 v1.3 的核心思路是：
+
+> **程序负责可压缩的低频结构，先验负责不可压缩的高频残差。**
+
+### D.2 三种渲染后端
+
+| 后端 | 实现 | 可复现 | 适用 |
+|---|---|---|---|
+| `raster` | 原引擎原样输出 | 完全 | 像素风 / 图标 / UI |
+| `procedural` | `core/effects.js`：亮度场→法线→方向光/高光/泛光/色调/fBm | 完全（seed） | 手绘 / 3D / 动画 / 写实的确定性先验 |
+| `neural` | 远程扩散 / img2img（`/api/render` 代理） | 受 seed 约束 | 照片级高频细节 |
+
+`style` 决定默认后端，`render` 可显式请求。神经不可用时自动回退 `procedural`，闭环不中断。
+
+### D.3 神经残差层
+
+`PixelDocument` 的图层新增 `kind: 'raster' | 'neural'`。程序层始终保存可复现、可编辑的
+低频结构与光照；`procedural`/`neural` 的渲染结果写入独立的 `neural` 层（每轮覆盖，不累积）。
+用户修改 DSL 只需重算受影响区域，写实图亦保留「改左上角那个角」级别的可控性。
+
+### D.4 DSL 扩展
+
+v1.3 新增 9 条：`style` `light` `relief` `specular` `bloom` `blur` `tone` `fbm` `render`（共 42 条）；
+v1.4 再新增 `inpaint`（共 43 条）。
+其中 `render` 在 AI 闭环中通过 `deferRender` 只标记请求，由 Agent 以非破坏方式统一渲染，
+避免多轮迭代重复叠加色调。
+
+### D.5 AI 逻辑演进
+
+- **风格一等公民**：风格只决定后端，不改变语法；同一流水线覆盖像素风与写实。
+- **区域热区诊断**：`computeTiles` 输出 3×3 改动热区，模型据此做定向局部修改。
+- **双智能体（可选）**：导演先做构图/光照规划，画师再写脚本。
+- **DeepSeek 多模态适配**：`deepseek-flash` 原生视觉；`thinking` 字段不下发；
+  图片仅允许出现在 user 消息（防御性清洗）；`detail` 级别可控。
+
+### D.6 v1.4 架构演进 —— 局部可控与多后端
+
+**D.6.1 局部重绘（`inpaint`）**
+
+- DSL 新增 `inpaint X Y W H "PROMPT" [STRENGTH]`：只登记请求，不改像素（`NON_DRAW`）。
+- Agent 消费请求（`inpaintRegion`）：
+  1. 神经后端可用 → 用 `maskMapDataURL` 生成全画布蒙版（白=重绘区），
+     调 `task:'inpaint'`，收到整图后**只把目标区域贴回**神经残差层（`pasteBuffer` + 蒙版）；
+  2. 不可用 → 从 `compositeBase()` 裁剪区域，套程序化管线后贴回，得到局部细化。
+- 界面提供「局部重绘」按钮，读取 `renderer.selection` 直接调用同一逻辑。
+- 意义：写实图仍保留「改左上角那个角」级别的可控性，不破坏整幅结构。
+
+**D.6.2 参考图 img2pixel（`io/img2pixel.js`）**
+
+纯函数、Node 可测。流程：
+
+```
+参考图 RGBA → 面积平均 / 最近邻降采样 → 边缘增强(unsharp) → 调色板量化 → 抖动
+```
+
+- 面积平均做 **alpha 加权**，避免半透明区域产生脏边；
+- 量化用感知加权距离（0.299/0.587/0.114）；
+- 支持 Floyd–Steinberg 误差扩散与 8×8 Bayer 有序抖动。
+
+**D.6.3 神经多后端路由**
+
+- 环境变量：`PX_RENDER_URL`（img2img）、`PX_INPAINT_URL`（局部重绘）、`PX_UPSCALE_URL`（放大），
+  后两者缺省回退到通用端点；
+- `/api/render` 按请求体 `task` 选择上游，`/api/config` 返回 `renderTasks` 能力表；
+- 前端 `requestNeural({task})` 统一入口，任何一路失败都自动降级为程序化，闭环不中断。
+
+### D.7 v1.5 架构演进 —— 动画与多格式导出
+
+**D.7.1 `core/animation.js` 帧模型**
+
+- 帧 = 文档图层的完整快照（`{id,name,kind,meta,visible,opacity,data}`），彼此独立、可任意增删改序；
+- `capture(doc)` 保存、`applyTo(doc,i)` 载入、`select/insertBlank/duplicate/remove/move` 导航；
+- 与撤销栈解耦：帧条操作走自己的状态，编辑仍由 `History` 管。
+
+**D.7.2 ONION 洋葱皮**
+
+- `Animation.onion`（0/1/2 档）→ App 生成前一帧（红）/后一帧（蓝）的着色副本；
+- `Renderer.onion` 在两遍 pass 中以 50% 叠加，位于合成图像之上、网格之下。
+
+**D.7.3 多格式导出（零依赖编码器）**
+
+| 格式 | 实现 | 要点 |
+|---|---|---|
+| 精灵表 PNG | `Animation.toSpritesheet` + 现 PNG 编码器 | 横向/网格排列，可留 padding |
+| GIF89a | `io/gif.js` | 全局调色板 + 每帧延时 + 透明索引 + Netscape 循环；自带 LZW（码长增长用 `>` 与标准解码器对齐） |
+| Aseprite | `io/aseprite.js` | Header(128B) + 每帧 FrameHeader + Layer(0x2004)/Cel(0x2005 raw RGBA) |
+
+GIF 的 LZW 编码器经**自写解码器对拍**验证（短序列、码长增长、4096 重置三种路径），
+Aseprite 经头部字段与文件尺寸自洽校验。
+
+### D.8 v1.6 架构演进 —— 多帧生成与参考图引导
+
+**D.8.1 多帧 AI 生成**
+
+`Agent` 新增 `frameCount` 与 `animation`，`run()` 由「单次闭环」升级为「逐帧闭环」：
+
+```
+for f in 0..N-1:
+    if f>0: animation.capture(doc); animation.duplicate(doc)   # 复制上一帧为当前帧
+    新开一段对话：system + user(帧上下文 + 上一帧渲染图[视觉])
+    运行原闭环（PLAN→EXECUTE→RENDER→CRITIQUE）
+```
+
+- 每帧复制上一帧而非从零重画，保证**时间一致性**；
+- 上一帧的渲染 PNG 回灌给模型，让它"看着上一帧改"；
+- 事件流新增 `frame`，轮次记录新增 `frame/frameTotal`，UI 逐帧展示。
+
+**D.8.2 参考图引导层**
+
+- 新增图层类型 `kind='reference'`：导入图片时可选，40% 透明度垫底供对照；
+- **不烘焙进成图**：`compositeBase()` 同时跳过 `neural` 与 `reference`，`Animation.composeLayers` 亦跳过；
+- 神经请求新增 `reference` 字段（与 `controls` 并列），后端可作 ControlNet/t2i-adapter 式引导；
+- 与 `img2pixel` 的区别：img2pixel 是"把参考图变成像素画"，reference 是"把参考图当引导但不改变产物"。
+
+**D.8.3 本轮修复**
+
+- **轮次卡片丢失**：此前每轮 `_liveCard.replaceWith` 后置空，第 2 轮起卡片未插入 DOM（只显示最后一轮）；
+  改为无占位卡时 `append`，并支持多帧各自新建占位卡。
+- **参考图误烘焙**：初版将参考层计入 `compositeBase()`，导致被渲染管线固化进画面；已分离。
+- **请求体上限**：神经渲染可携带底图 + 4 控制图 + 蒙版 + 参考图，`MAX_BODY` 由 8MB 提到 32MB。

@@ -198,9 +198,57 @@ vline 16 4 4 c6
 circle 16 4 2 c8 fill
 rect 6 21 20 8 c5 fill
 rect 12 23 8 4 c9 fill
-rect 4 22 3 6 c5 fill
-rect 25 22 3 6 c5 fill
+    rect 4 22 3 6 c5 fill
+    rect 25 22 3 6 c5 fill
+    outline c0
+`,
+  },
+  {
+    name: '写实光影 · 32×32',
+    desc: 'style / light / fbm / render · 程序化写实管线',
+    code: `# 写实光影（程序化先验）
+size 32 32
+palette pico8
+clear transparent
+seed 7
+name "写实光影"
+style photo
+
+bg c1
+light -1 -1 1 1
+fbm 0 0 32 32 c1 c5 4 8 mod
+circle 16 15 9 c9 fill
+circle 16 15 8 c10 fill
+shade 8 7 16 16 c4 0.25
+px 12 10 c7
+px 13 11 c7
 outline c0
+render photo
+`,
+  },
+  {
+    name: '黏土材质球 · 32×32',
+    desc: 'light / relief / specular / bloom · 3D 质感',
+    code: `# 黏土材质球
+size 32 32
+palette pico8
+clear transparent
+seed 2
+name "材质球"
+style 3d
+
+light -1 -1 1.2 1
+light 1 1 0.6 0.4
+bg c1
+fbm 0 0 32 32 c1 c6 3 6 mod
+circle 16 15 11 c4 fill
+circle 16 15 10 c9 fill
+shade 7 6 16 16 c15 0.3
+specular 0.8 20
+bloom 0.8 0.45 2
+tone 1.05 1.12 1.05 0 0.18
+outline c0
+render 3d
 `,
   },
 ];

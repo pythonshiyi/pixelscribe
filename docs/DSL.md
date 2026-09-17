@@ -3,9 +3,10 @@
 PixelScript 是「像素画笔」的绘制领域专用语言（DSL）。它被设计成**大模型能一次写对、
 人类能一眼读懂、引擎能毫秒执行**。
 
-- 版本：`1.0`
+- 版本：`1.4`
 - 文件扩展名：`.pxs`
 - MIME / 代码围栏：`pixelscript`、`px`、`pxs`
+- 指令数：43（33 绘制 + 9 程序化渲染 + 1 局部重绘）
 
 ---
 
@@ -130,6 +131,16 @@ rect 4 4 10 10 c8 fill         # 显式填充
 | 31 | `shade` | `shade X Y W H COLOR [AMOUNT]` |
 | 32 | `bevel` | `bevel X Y W H [SIZE] [STRENGTH]` |
 | 33 | `graddither` | `graddither X Y W H C1 C2 [checker\|bayer\|h\|v] [v\|h]` |
+| 34 | `style` | `style pixel\|painting\|ink\|anime\|3d\|photo` |
+| 35 | `light` | `light DX DY [Z] [STRENGTH] [COLOR]` |
+| 36 | `relief` | `relief [STRENGTH] [AMBIENT] [NORMAL_STRENGTH]` |
+| 37 | `specular` | `specular [STRENGTH] [POWER] [NORMAL_STRENGTH]` |
+| 38 | `bloom` | `bloom [THRESHOLD] [STRENGTH] [RADIUS]` |
+| 39 | `blur` | `blur [RADIUS]` |
+| 40 | `tone` | `tone [GAMMA] [CONTRAST] [SATURATION] [BRIGHTNESS] [VIGNETTE]` |
+| 41 | `fbm` | `fbm X Y W H C1 C2 [OCTAVES] [SCALE] [fill\|over\|mod]` |
+| 42 | `render` | `render [STYLE]` |
+| 43 | `inpaint` | `inpaint X Y W H "PROMPT" [STRENGTH]` |
 
 ---
 
@@ -376,6 +387,92 @@ bevel 2 2 12 12 2 0.35
 graddither 0 0 64 32 c12 c7 bayer v
 ```
 
+### 4.4 程序化渲染扩展（v1.3：从像素画到写实）
+
+这一组指令是「程序 + 先验」中的**确定性先验**：不依赖神经网络，用亮度场推导法线，
+再做方向光、高光、泛光、色调映射与程序化材质，把平涂画面推进到有体积、有材质、有光的层次。
+风格为 `photo` 且服务端配置了 `PX_RENDER_URL` 时，`render` 会进一步调用神经后端补全高频细节。
+
+#### `style STYLE`
+设定作品风格，决定默认渲染后端：`pixel` → 原样（raster）；`painting/ink/anime/3d` → 程序化；
+`photo` → 神经后端（不可用时回退程序化）。
+```
+style photo
+```
+
+#### `light DX DY [Z] [STRENGTH] [COLOR]`
+声明一盏方向光。`DX DY` 是**指向光源**的方向（`-1 -1` 表示左上主光），
+`Z` 为高度（默认 1），`STRENGTH` 为强度（默认 1），`COLOR` 为光色（默认白）。
+可声明多盏，供 `relief` / `specular` 使用。
+```
+light -1 -1 1 1            # 左上主光
+light 1 1 0.5 0.4 #f80     # 右下暖色补光
+```
+
+#### `relief [STRENGTH] [AMBIENT] [NORMAL_STRENGTH]`
+方向光浮雕：由亮度场推导法线，按 `light` 做漫反射塑形。
+`AMBIENT` 为环境光下限（默认 0.35）。这是让平涂画面「立体起来」的关键一步。
+```
+relief 0.9 0.3
+```
+
+#### `specular [STRENGTH] [POWER] [NORMAL_STRENGTH]`
+镜面高光（半程向量），`POWER` 越大高光越锐（默认 16）。给材质加湿润/金属光泽。
+```
+specular 0.7 24
+```
+
+#### `bloom [THRESHOLD] [STRENGTH] [RADIUS]`
+高光溢出/辉光：提取超过 `THRESHOLD`（默认 0.7）的亮部，模糊后叠加。
+适合光源、金属反光、魔法效果。
+```
+bloom 0.75 0.5 2
+```
+
+#### `blur [RADIUS]`
+盒式模糊（预乘 Alpha，不会在透明边缘渗色）。用于软化与景深感。
+
+#### `tone [GAMMA] [CONTRAST] [SATURATION] [BRIGHTNESS] [VIGNETTE]`
+相机式色调映射，写实感最廉价也最有效的一步。参数均为标量（默认 `1.08 1.12 1.05 0 0.15`）。
+```
+tone 1.1 1.15 1.05 0 0.2
+```
+
+#### `fbm X Y W H C1 C2 [OCTAVES] [SCALE] [fill|over|mod]`
+分形布朗运动噪声材质。`OCTAVES` 为倍频数（1–8，默认 4），`SCALE` 控制特征尺度。
+- `fill`：用噪声在 `C1→C2` 间填充区域；
+- `over`：以噪声为 Alpha 叠加；
+- `mod`：**按噪声调制已有颜色的明度**（在已有形状上做石头/木纹/皮革质感，最常用）。
+```
+fbm 0 0 32 32 c1 c5 4 8 mod
+```
+
+#### `render [STYLE]`
+按风格执行渲染管线。省略 `STYLE` 时使用当前 `style`。
+在 AI 闭环中该指令只标记渲染请求，由引擎统一以非破坏方式渲染到**神经残差层**
+（避免多轮迭代重复叠加色调）；在脚本面板手动运行时则立即作用于当前图层。
+```
+render photo
+```
+
+> 典型写实脚本顺序：`style` → 铺大色块 → `light` → `fbm` → `relief` → `specular` → `bloom` → `tone` → `render`。
+
+### 4.5 局部重绘（v1.4）
+
+#### `inpaint X Y W H "PROMPT" [STRENGTH]`
+只对矩形区域 `(X,Y,W,H)` 做细化，其余像素保持不变。`STRENGTH` ∈ [0,1]（默认 0.6）。
+在 AI 闭环中，Agent 消费该请求：
+
+- 神经后端可用 → 生成蒙版（白=重绘区）调用 inpaint，只把结果贴回目标区域；
+- 不可用 → 用程序化先验（`relief`/`tone` 等）对区域做局部细化。
+
+> 这是「改左上角那个角」级别可控性的落地：整幅结构不动，只重绘需要的部分。
+> 在脚本面板手动运行时该指令只登记请求（需配合 AI 闭环或界面「局部重绘」按钮生效）。
+
+```
+inpaint 8 8 16 16 "更细腻的皮肤与高光" 0.7
+```
+
 ---
 
 ## 5. 执行语义
@@ -496,3 +593,5 @@ noise 0 0 64 40 c7 0.02
 |---|---|
 | 1.0 | 初始 28 条指令，5 套调色板，5×7 字体，容错执行与执行报告 |
 | 1.2 | 新增 5 条精细化指令：`curve`（贝塞尔）/`arc`（圆弧）/`shade`（同色系着色）/`bevel`（浮雕）/`graddither`（抖动渐变），共 33 条 |
+| 1.3 | 新增 9 条程序化渲染指令：`style`/`light`/`relief`/`specular`/`bloom`/`blur`/`tone`/`fbm`/`render`，支持风格化与写实管线，共 42 条 |
+| 1.4 | 新增 `inpaint` 局部重绘；参考图 img2pixel（面积平均/最近邻 + Floyd/Bayer 抖动 + 边缘增强）；神经后端多任务路由（img2img/inpaint/upscale），共 43 条 |

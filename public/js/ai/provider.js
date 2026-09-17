@@ -41,7 +41,29 @@ export function isOfficialEndpoint(baseUrl) {
     || b === 'https://api.deepseek.com/v1' || b === 'http://api.deepseek.com/v1';
 }
 
-const USER_AGENT = 'PixelScribe/1.1 (+https://github.com/pythonshiyi/pixelscribe)';
+/**
+ * 是否 DeepSeek Vision 系列（deepseek-flash / 旧 deepseek-v4-flash-vision-exp）。
+ * 该系列原生多模态，不接收 `thinking` 字段（发了会被 400 拒绝）。
+ */
+export function isDeepseekFlashModel(model) {
+  return /deepseek.*(flash|vision)/i.test(String(model || ''));
+}
+
+/**
+ * 视觉消息只能出现在 user 角色（DeepSeek 规定，system/assistant 带图返回 400）。
+ * 这里做一层防御性清洗：把非 user 消息里的图片块降级为纯文本。
+ * @param {any[]} messages
+ */
+export function sanitizeMessages(messages) {
+  return (messages || []).map((m) => {
+    if (!Array.isArray(m?.content)) return m;
+    if (m.role === 'user') return m;
+    const text = m.content.filter((p) => p?.type === 'text').map((p) => p.text).join('\n');
+    return { ...m, content: text };
+  });
+}
+
+const USER_AGENT = 'PixelScribe/1.6 (+https://github.com/pythonshiyi/pixelscribe)';
 
 function randomId() {
   try {
@@ -72,6 +94,8 @@ export class Provider {
     this.timeoutMs = config.timeoutMs ?? 180000;
     this.thinking = String(config.thinking || 'auto').toLowerCase();
     this.maxTokens = config.maxTokens ?? 2048;
+    // DeepSeek Vision 细节级别：low（512×512，快且省）/ high / original / auto
+    this.visionDetail = config.visionDetail || 'high';
     this.sessionId = randomId();
   }
 
@@ -87,18 +111,27 @@ export class Provider {
     return h;
   }
 
+  /** 当前模型是否 DeepSeek Vision 系列。 */
+  get isFlashModel() { return isDeepseekFlashModel(this.model); }
+
   /** 要下发的 thinking 字段（无则 null）。 */
   thinkingBody() {
-    const known = isOfficialEndpoint(this.baseUrl) || isOpencodeEndpoint(this.baseUrl);
+    // deepseek-flash 是视觉模型，不属于推理系列：auto/disabled 一律不下发，
+    // 否则真实端点会因未知字段返回 400。
+    if (this.isFlashModel) {
+      return this.thinking === 'enabled' ? { type: 'enabled' } : null;
+    }
     if (this.thinking === 'enabled') return { type: 'enabled' };
     if (this.thinking === 'disabled') return { type: 'disabled' };
+    const known = isOfficialEndpoint(this.baseUrl) || isOpencodeEndpoint(this.baseUrl);
     return known ? { type: 'disabled' } : null;
   }
 
   buildPayload(messages, opts, withThinking) {
+    const clean = sanitizeMessages(messages);
     if (this.proxy) {
       return {
-        messages,
+        messages: clean,
         model: this.model,
         temperature: this.temperature,
         stream: opts.stream !== false,
@@ -109,7 +142,7 @@ export class Provider {
     }
     const body = {
       model: this.model,
-      messages,
+      messages: clean,
       temperature: this.temperature,
       stream: opts.stream !== false,
     };

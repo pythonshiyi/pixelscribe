@@ -129,6 +129,17 @@
     <canvas id="stageCanvas"></canvas>
     <div class="stage-hud" id="stageHud">—</div>
     <div class="stage-badge" id="stageBadge">32 × 32</div>
+    <div class="frame-bar" id="frameBar">
+      <div class="frame-tools">
+        <button class="frame-btn" id="btnFrameAdd" title="新增空白帧">＋</button>
+        <button class="frame-btn" id="btnFrameDup" title="复制当前帧">⧉</button>
+        <button class="frame-btn" id="btnFrameDel" title="删除当前帧">🗑</button>
+        <button class="frame-btn" id="btnFramePlay" title="播放 / 暂停">▶</button>
+        <button class="frame-btn" id="btnFrameOnion" title="洋葱皮（前后帧半透明叠加）">◍</button>
+        <input class="frame-fps" id="frameFps" type="number" min="1" max="30" value="8" title="帧率 (fps)" />
+      </div>
+      <div class="frame-list" id="frameList"></div>
+    </div>
   </section>
 
   <aside class="panel">
@@ -157,7 +168,9 @@
           </div>
           <div class="ai-controls">
             <label class="switch"><input type="checkbox" id="aiIncremental" checked /><span>增量迭代</span></label>
+            <label class="switch"><input type="checkbox" id="aiPlan" /><span>导演模式</span></label>
             <label class="mini-field"><span>轮次</span><input id="aiMaxIter" type="number" min="1" max="12" value="6" /></label>
+            <label class="mini-field"><span>帧数</span><input id="aiFrames" type="number" min="1" max="24" value="1" title="生成 N 帧循环动画" /></label>
             <label class="mini-field"><span>画布</span>
               <select id="aiSize">
                 <option value="16">16</option>
@@ -169,10 +182,21 @@
                 <option value="128">128</option>
               </select>
             </label>
+            <label class="mini-field"><span>风格</span>
+              <select id="aiStyle">
+                <option value="pixel" selected>像素</option>
+                <option value="painting">手绘/油画</option>
+                <option value="ink">水墨/线稿</option>
+                <option value="anime">动画赛璐璐</option>
+                <option value="3d">3D/黏土</option>
+                <option value="photo">写实照片</option>
+              </select>
+            </label>
           </div>
           <div class="ai-actions">
             <button class="btn primary" id="btnGenerate"><svg><use href="#i-wand"/></svg><span>开始生成</span></button>
             <button class="btn danger" id="btnAbort" disabled><svg><use href="#i-stop"/></svg><span>中止</span></button>
+            <button class="btn ghost" id="btnLocalRedraw" title="用当前选区做局部重绘（M 键框选）"><svg><use href="#i-wand"/></svg><span>局部重绘</span></button>
           </div>
           <div class="ai-status" id="aiStatus">就绪</div>
         </div>
@@ -274,6 +298,8 @@ outline c1"></textarea>
   <span id="stAi" class="st-ai">演示模式</span>
   <div class="flex-spacer"></div>
   <span id="stPixels">0 像素</span>
+  <span class="sep"></span>
+  <span id="stFrame">帧 1/1</span>
   <span class="sep"></span>
   <span id="stHistory">历史 0</span>
 </footer>

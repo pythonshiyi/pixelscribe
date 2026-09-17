@@ -67,6 +67,13 @@ window.HTMLCanvasElement.prototype.getContext = function getContext() { return m
 window.HTMLCanvasElement.prototype.toDataURL = function toDataURL() { return 'data:image/png;base64,iVBORw0KGgo='; };
 window.URL.createObjectURL = () => 'blob:mock';
 window.URL.revokeObjectURL = () => {};
+// 被测代码里的 `URL` 解析到 Node 全局，需一并打桩（Node 的 createObjectURL 只接受 Node Blob）
+if (globalThis.URL) {
+  try {
+    globalThis.URL.createObjectURL = () => 'blob:mock';
+    globalThis.URL.revokeObjectURL = () => {};
+  } catch { /* 只读则忽略 */ }
+}
 
 class ImageDataStub {
   constructor(data, w, h) {
@@ -367,6 +374,32 @@ ok('选区创建与删除', () => {
   app.tools.setTool('pencil');
 });
 
+/* ─────────── 局部重绘 ─────────── */
+
+let localResult = null;
+try {
+  app.tools.setTool('select');
+  app.doc.activeLayer.buffer.clear({ r: 30, g: 30, b: 30, a: 255 });
+  app.doc.invalidate();
+  const a = coordsFor(4, 4);
+  const b = coordsFor(12, 12);
+  pointer('pointerdown', a.x, a.y);
+  pointer('pointermove', b.x, b.y);
+  window.dispatchEvent(new window.MouseEvent('pointerup', { bubbles: true, clientX: b.x, clientY: b.y }));
+  localResult = await app.applyLocalRender(app.renderer.selection, '细化');
+} catch (err) {
+  failures.push({ name: '局部重绘', err });
+  console.log(`  \x1b[31m✗ 局部重绘抛出\x1b[0m\n      ${err.stack}`);
+}
+ok('局部重绘写入神经残差层', () => {
+  assert(localResult, '应返回结果');
+  assert(app.doc.neuralLayer, '应创建神经残差层');
+  assert(app.doc.neuralLayer.buffer.opaqueCount() > 20, `区域内容过少：${app.doc.neuralLayer.buffer.opaqueCount()}`);
+});
+ok('局部重绘按钮存在于 AI 面板', () => assert($('#btnLocalRedraw'), '缺少 #btnLocalRedraw'));
+app.tools.clearSelection();
+app.tools.setTool('pencil');
+
 /* ─────────── 撤销 / 重做 ─────────── */
 
 ok('撤销与重做按钮', () => {
@@ -511,6 +544,13 @@ ok('作品面板存在（文件空间）', () => {
   assert(window.document.querySelector('[data-pane="gallery"]'), '缺少作品 pane');
 });
 
+ok('AI 风格选择器有 6 种风格', () => {
+  const sel = $('#aiStyle');
+  assert(sel, '缺少 #aiStyle');
+  eq(sel.querySelectorAll('option').length, 6);
+  assert($('#aiPlan'), '缺少导演模式开关 #aiPlan');
+});
+
 ok('示例库可载入', () => {
   $('#btnSamples').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert(!$('#modalBackdrop').hidden);
@@ -533,6 +573,56 @@ ok('点击遮罩关闭模态', () => {
   const backdrop = $('#modalBackdrop');
   backdrop.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert(backdrop.hidden, '遮罩点击未关闭');
+});
+
+/* ─────────── 动画帧 / 洋葱皮 / 导出 ─────────── */
+
+ok('帧条渲染出缩略图与状态', () => {
+  eq(window.document.querySelectorAll('#frameList .frame-thumb').length, app.animation.length);
+  assert($('#stFrame').textContent.includes('/'), '状态栏应显示帧号');
+  assert($('#btnFrameAdd') && $('#btnFramePlay') && $('#btnFrameOnion'), '缺少帧条按钮');
+});
+
+ok('新增 / 复制 / 删除帧', () => {
+  const n0 = app.animation.length;
+  $('#btnFrameAdd').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.length, n0 + 1);
+  $('#btnFrameDup').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.length, n0 + 2);
+  eq(window.document.querySelectorAll('#frameList .frame-thumb').length, n0 + 2);
+  for (let i = 0; i < n0 + 5; i++) {
+    $('#btnFrameDel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  }
+  eq(app.animation.length, 1, '至少保留一帧');
+});
+
+ok('洋葱皮开关循环 关→前→前后', () => {
+  app.animation.onion = 0;
+  const b = $('#btnFrameOnion');
+  b.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.onion, 1);
+  b.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.onion, 2);
+  b.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.onion, 0);
+});
+
+ok('播放 / 暂停状态切换', () => {
+  app.animation.insertBlank(app.doc);
+  app.updateOnion();
+  app.togglePlay();
+  assert(app.playing, '应进入播放');
+  app.stopPlay();
+  assert(!app.playing, '应停止播放');
+  app.animation.remove(app.animation.current);
+  app.animation.applyTo(app.doc, 0);
+  app.syncFrames();
+});
+
+ok('精灵表 / GIF / Aseprite 导出不抛异常', () => {
+  app.exportSpriteSheet();
+  app.exportGIF();
+  app.exportAseprite();
 });
 
 /* ─────────── AI 闭环（演示模式） ─────────── */
@@ -588,6 +678,35 @@ try {
   failures.push({ name: 'AI 闭环', err });
   console.log(`  \x1b[31m✗ AI 闭环抛出\x1b[0m\n      ${err.stack}`);
 }
+
+/* ─────────── 多帧生成 / 参考层 ─────────── */
+
+ok('AI 面板存在帧数输入', () => assert($('#aiFrames'), '缺少 #aiFrames'));
+
+try {
+  const before = app.animation.length;
+  $('#aiBrief').value = '走路循环';
+  $('#aiFrames').value = '2';
+  $('#aiMaxIter').value = '2';
+  window.document.querySelector('#tabs .tab[data-tab="ai"]')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await app.chat.generate();
+  ok('多帧生成新增帧并渲染多张轮次卡片', () => {
+    assert(app.animation.length >= before + 1, `帧数 ${app.animation.length}`);
+    const cards = window.document.querySelectorAll('#aiLog .round');
+    assert(cards.length >= 2, `轮次卡片过少 ${cards.length}（历史上只显示了最后一轮）`);
+  });
+} catch (err) {
+  failures.push({ name: '多帧生成', err });
+  console.log(`  \x1b[31m✗ 多帧生成抛出\x1b[0m\n      ${err.stack}`);
+}
+
+ok('导入 AI 参考层', () => {
+  app._doImportReference({ width: 8, height: 8 });
+  const refs = app.doc.layers.filter((l) => l.kind === 'reference');
+  eq(refs.length, 1, '应只有一个参考层');
+  assert(refs[0].locked, '参考层应锁定');
+});
 
 /* ─────────── 持久化 ─────────── */
 
