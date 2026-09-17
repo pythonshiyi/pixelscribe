@@ -191,6 +191,22 @@ export function pasteBuffer(dst, src, dx, dy, mask = null) {
 }
 
 /**
+ * 裁剪区域并编码为 PNG dataURL（大画布回灌给模型看细节用）。
+ * @param {PixelBuffer} buffer @param {{x:number,y:number,w:number,h:number}} rect
+ * @param {number} [minEdge] 小于该长边时最近邻放大，保证模型看清像素
+ */
+export function cropDataURL(buffer, rect, minEdge = 0) {
+  const r = clampRect(rect, buffer.width, buffer.height);
+  if (!r) return null;
+  const sub = cropBuffer(buffer, r);
+  const scale = minEdge > 0 ? Math.max(1, Math.round(minEdge / Math.max(r.w, r.h))) : 1;
+  const png = scale > 1
+    ? encodePNGScaled(sub.data, sub.width, sub.height, sub.width * scale, sub.height * scale)
+    : encodePNG(sub.data, sub.width, sub.height);
+  return `data:image/png;base64,${toBase64(png)}`;
+}
+
+/**
  * 生成全画布蒙版 PNG：白=重绘区，黑=保留区（神经 inpainting 的标准输入）。
  * @param {PixelBuffer} buffer @param {{x:number,y:number,w:number,h:number}} rect
  */

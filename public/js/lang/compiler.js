@@ -174,10 +174,10 @@ export const COMMANDS = {
   /* ── 指令型 ── */
   size: {
     min: 2, max: 2,
-    doc: 'size W H —— 设定画布尺寸（1–512）',
+    doc: 'size W H —— 设定画布尺寸（1–2048，大画布建议配合百分比坐标与 render）',
     run(ctx, a) {
       const w = Math.round(num(a[0])), h = Math.round(num(a[1]));
-      if (w < 1 || h < 1 || w > 512 || h > 512) throw new PxError(`尺寸超出范围 1–512：${w}×${h}`);
+      if (w < 1 || h < 1 || w > 2048 || h > 2048) throw new PxError(`尺寸超出范围 1–2048：${w}×${h}`);
       if (ctx.sawDraw) throw new PxError("'size' 必须位于所有绘制指令之前");
       ctx.doc.resize(w, h);
       ctx.doc.invalidate();
@@ -822,6 +822,75 @@ export const COMMANDS = {
   },
 };
 
+/* ───────────────────────── 百分比坐标 ───────────────────────── */
+
+/**
+ * 每个指令的位置参数「轴向」表：x=按宽、y=按高、d=按长边、n/m/c/s=非坐标。
+ * 带 `%` 后缀的数字会在执行前按轴向解析为像素值，
+ * 这样模型在大画布上可以写 `ellipse 50% 50% 30% 25%` 而不必心算坐标。
+ */
+const AXES = {
+  px: ['x', 'y'],
+  hline: ['x', 'y', 'd'],
+  vline: ['x', 'y', 'd'],
+  line: ['x', 'y', 'x', 'y'],
+  rect: ['x', 'y', 'x', 'y'],
+  rrect: ['x', 'y', 'x', 'y', 'd'],
+  circle: ['x', 'y', 'd'],
+  ellipse: ['x', 'y', 'x', 'y'],
+  fill: ['x', 'y'],
+  grad: ['x', 'y', 'x', 'y'],
+  dither: ['x', 'y', 'x', 'y'],
+  noise: ['x', 'y', 'x', 'y'],
+  copy: ['x', 'y', 'x', 'y', 'x', 'y'],
+  erase: ['x', 'y', 'x', 'y'],
+  adjust: ['x', 'y', 'x', 'y'],
+  text: ['x', 'y'],
+  curve: ['x', 'y', 'x', 'y', 'x', 'y'],
+  arc: ['x', 'y', 'd'],
+  shade: ['x', 'y', 'x', 'y'],
+  bevel: ['x', 'y', 'x', 'y'],
+  graddither: ['x', 'y', 'x', 'y'],
+  fbm: ['x', 'y', 'x', 'y'],
+  inpaint: ['x', 'y', 'x', 'y'],
+};
+
+const POLY_MODES = new Set(['stroke', 'outline', 'fill', 'solid']);
+
+function isPercentToken(tok) {
+  return tok && !tok.quoted && typeof tok.value === 'string' && tok.value.endsWith('%');
+}
+
+/**
+ * 就地解析参数中的 `N%` 为像素值（按指令轴向）。
+ * @param {string} name @param {{value:string,quoted:boolean}[]} args
+ * @param {number} W @param {number} H
+ */
+function resolvePercents(name, args, W, H) {
+  const set = (tok, kind) => {
+    const f = Number(String(tok.value).slice(0, -1));
+    if (!Number.isFinite(f)) return false;
+    const k = f / 100;
+    // x/y 映射到 [0, 尺寸-1]（100% = 最后一像素）；尺寸类按长边
+    const v = kind === 'x' ? k * (W - 1) : kind === 'y' ? k * (H - 1) : k * Math.max(W, H);
+    tok.value = String(Math.round(v));
+    return true;
+  };
+  if (name === 'poly') {
+    let start = 1;
+    if (args[1] && !isPercentToken(args[1]) && POLY_MODES.has(String(args[1].value).toLowerCase())) start = 2;
+    for (let i = start; i < args.length; i++) {
+      if (isPercentToken(args[i])) set(args[i], (i - start) % 2 === 0 ? 'x' : 'y');
+    }
+    return;
+  }
+  const axes = AXES[name];
+  if (!axes) return;
+  for (let i = 0; i < args.length && i < axes.length; i++) {
+    if (isPercentToken(args[i])) set(args[i], axes[i]);
+  }
+}
+
 /* ───────────────────────── 主入口 ───────────────────────── */
 
 function countDiff(after, before) {
@@ -874,6 +943,7 @@ export function runScript(source, doc, options = {}) {
       return;
     }
     if (ctx.report.ops >= maxOps) return;
+    resolvePercents(name, args, ctx.W, ctx.H);
     try {
       cmd.run(ctx, args);
       if (!NON_DRAW.has(name)) ctx.sawDraw = true;

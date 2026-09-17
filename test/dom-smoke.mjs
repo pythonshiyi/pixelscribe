@@ -516,6 +516,28 @@ ok('导出对话框', () => {
   assert($('#modalBackdrop').hidden);
 });
 
+ok('新建画布支持大尺寸（到 1024）', () => {
+  $('#btnNew').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const cards = [...window.document.querySelectorAll('#modalBody .size-card')];
+  assert(cards.some((c) => c.textContent.replace('²', '') === '1024'), '缺少 1024 画布');
+  $('#modalClose').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+});
+
+ok('导出对话框含平滑超分选项且可导出', () => {
+  $('#btnExport').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#exSmooth'), '缺少 #exSmooth');
+  $('#exSmooth').checked = true;
+  const png = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('导出 PNG'));
+  png.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#modalBackdrop').hidden, '导出后应关闭');
+  $('#exSmooth').checked = false;
+});
+
+ok('AI 画布选项含大尺寸', () => {
+  const opts = [...$('#aiSize').options].map((o) => o.value);
+  assert(opts.includes('512'), '缺少 512 选项');
+});
+
 ok('设置对话框可保存', () => {
   $('#btnSettings').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert(!$('#modalBackdrop').hidden);

@@ -8,6 +8,7 @@
 
 import { encodePNG, encodePNGScaled, toBase64 } from '../io/png.js';
 import { controlMaps as buildControlMaps, controlMapDataURL, bufferDataURL } from './backends.js';
+import { supersample } from './supersample.js';
 
 /** 与 UI 主题配套的画布配色（棋盘底 / 网格 / 边框 / 对称轴）。 */
 const THEMES = {
@@ -216,8 +217,13 @@ export class Renderer {
     }
 
     if (this.grid && this.scale >= 5) {
+      // 只绘制视口内的网格线，避免大画布下列数爆炸
       ctx.lineWidth = 1;
-      for (let x = 0; x <= doc.width; x++) {
+      const gx0 = Math.max(0, Math.floor((0 - ox) / this.scale));
+      const gx1 = Math.min(doc.width, Math.ceil((canvas.width - ox) / this.scale));
+      const gy0 = Math.max(0, Math.floor((0 - oy) / this.scale));
+      const gy1 = Math.min(doc.height, Math.ceil((canvas.height - oy) / this.scale));
+      for (let x = gx0; x <= gx1; x++) {
         ctx.strokeStyle = x % 8 === 0 ? T.gridStrong : T.grid;
         const px = ox + x * this.scale + 0.5;
         ctx.beginPath();
@@ -225,7 +231,7 @@ export class Renderer {
         ctx.lineTo(px, oy + h);
         ctx.stroke();
       }
-      for (let y = 0; y <= doc.height; y++) {
+      for (let y = gy0; y <= gy1; y++) {
         ctx.strokeStyle = y % 8 === 0 ? T.gridStrong : T.grid;
         const py = oy + y * this.scale + 0.5;
         ctx.beginPath();
@@ -316,6 +322,32 @@ export class Renderer {
       png = encodePNGScaled(px, doc.width, doc.height, ow, oh);
     }
     return { dataURL: `data:image/png;base64,${toBase64(png)}`, width: ow, height: oh, scale };
+  }
+
+  /** 把透明区域垫成白底 @returns {Uint8ClampedArray} */
+  _flatten(data, w, h) {
+    const flat = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const a = data[i * 4 + 3] / 255;
+      flat[i * 4] = Math.round(data[i * 4] * a + 255 * (1 - a));
+      flat[i * 4 + 1] = Math.round(data[i * 4 + 1] * a + 255 * (1 - a));
+      flat[i * 4 + 2] = Math.round(data[i * 4 + 2] * a + 255 * (1 - a));
+      flat[i * 4 + 3] = 255;
+    }
+    return flat;
+  }
+
+  /**
+   * 平滑超分导出（写实/绘画风）：双线性 + 锐化 + 微纹理，避免最近邻的硬块。
+   * @param {number} longEdge @param {boolean} [withBackground]
+   */
+  exportSmooth(longEdge = 512, withBackground = false) {
+    const doc = this.doc;
+    const scale = Math.max(1, longEdge / Math.max(doc.width, doc.height));
+    const up = supersample(doc.composite(), scale, { sharpen: 0.5, grain: 0.03, seed: doc.seed || 1 });
+    const raw = withBackground ? this._flatten(up.data, up.width, up.height) : up.data;
+    const png = encodePNG(raw, up.width, up.height);
+    return { dataURL: `data:image/png;base64,${toBase64(png)}`, width: up.width, height: up.height, scale };
   }
 
   /** 供视觉回灌使用：放大到长边 longEdge，不垫底色（保留透明） */

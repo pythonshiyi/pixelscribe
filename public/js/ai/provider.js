@@ -63,7 +63,7 @@ export function sanitizeMessages(messages) {
   });
 }
 
-const USER_AGENT = 'PixelScribe/1.6 (+https://github.com/pythonshiyi/pixelscribe)';
+const USER_AGENT = 'PixelScribe/1.7 (+https://github.com/pythonshiyi/pixelscribe)';
 
 function randomId() {
   try {

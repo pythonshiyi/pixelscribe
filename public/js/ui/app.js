@@ -17,6 +17,7 @@ import { initLayers, initPalette, initScript } from './panels.js';
 import { rgbaToHex } from '../util/color.js';
 import { runScript } from '../lang/compiler.js';
 import { imageToPixels } from '../io/img2pixel.js';
+import { storeGet, storeSet } from '../io/store.js';
 import { SAMPLES } from '../samples.js';
 
 const STORAGE_KEY = 'pixelscribe.doc.v1';
@@ -69,7 +70,7 @@ export class App {
     this.bindStageResize();
     this.bindFrameBar();
 
-    const restored = this.restore();
+    const restored = await this.restore();
     if (!restored) {
       this.scriptPanel.setValue(SAMPLES[0].code);
       runScript(SAMPLES[0].code, this.doc, { mode: 'replace' });
@@ -523,7 +524,7 @@ export class App {
   /* ── 文件 ── */
 
   newDocumentDialog() {
-    const sizes = [16, 24, 32, 48, 64, 96, 128, 256];
+    const sizes = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
     const body = el('div', {}, [
       el('p', { text: '选择新画布尺寸（会清空当前内容，可用 Ctrl+Z 撤销）' }),
       el('div', { class: 'size-grid' }, sizes.map((s) => el('button', {
@@ -723,6 +724,7 @@ export class App {
         },
       }))),
       el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'exBg' }), el('span', { text: '垫白底（透明区域变白）' })]),
+      el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'exSmooth' }), el('span', { text: '平滑超分（写实/绘画；像素风请关闭）' })]),
       el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'exFull', checked: true }), el('span', { text: '忽略当前视口缩放（按源尺寸导出）' })]),
     ]);
     body.dataset.scale = '4';
@@ -741,9 +743,13 @@ export class App {
           onClick: () => {
             const s = Number(body.dataset.scale) || 4;
             const bg = $('#exBg')?.checked ?? false;
-            const { dataURL, width, height } = this.renderer.export(Math.max(this.doc.width, this.doc.height) * s, bg);
+            const smooth = $('#exSmooth')?.checked ?? false;
+            const target = Math.max(this.doc.width, this.doc.height) * s;
+            const { dataURL, width, height } = smooth
+              ? this.renderer.exportSmooth(target, bg)
+              : this.renderer.export(target, bg);
             downloadDataURL(`${this.doc.title || 'pixelscribe'}_${width}x${height}.png`, dataURL);
-            toast(`已导出 ${width}×${height} PNG`, 'ok');
+            toast(`已导出 ${width}×${height} PNG${smooth ? '（平滑超分）' : ''}`, 'ok');
           },
         },
       ],
@@ -959,25 +965,26 @@ export class App {
 
   save() {
     if (!this._dirty) return;
-    try {
-      const payload = {
-        doc: this.doc.toJSON(),
-        script: this.scriptPanel?.getValue() ?? '',
-        camera: { scale: this.renderer.scale, offsetX: this.renderer.offsetX, offsetY: this.renderer.offsetY },
-        animation: this.animation?.toJSON(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-      this._dirty = false;
-    } catch {
-      /* 超配额时静默失败 */
-    }
+    const payload = {
+      doc: this.doc.toJSON(),
+      script: this.scriptPanel?.getValue() ?? '',
+      camera: { scale: this.renderer.scale, offsetX: this.renderer.offsetX, offsetY: this.renderer.offsetY },
+      animation: this.animation?.toJSON(),
+    };
+    const json = JSON.stringify(payload);
+    // 小文档同步写 localStorage（兼容旧路径、关页即存）；大文档/超配额则依赖 IndexedDB
+    try { localStorage.setItem(STORAGE_KEY, json); } catch { /* 超配额：交给 IndexedDB */ }
+    storeSet(STORAGE_KEY, json).catch(() => { /* 隐私模式等 */ });
+    this._dirty = false;
   }
 
-  restore() {
+  async restore() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      let raw = null;
+      try { raw = localStorage.getItem(STORAGE_KEY); } catch { /* ignore */ }
+      if (!raw) raw = await storeGet(STORAGE_KEY);
       if (!raw) return false;
-      const payload = JSON.parse(raw);
+      const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
       const doc = PixelDocument.fromJSON(payload.doc);
       this.doc = doc;
       if (payload.animation) {

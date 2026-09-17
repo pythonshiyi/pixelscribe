@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 
 /* ───────────────────────── .env 加载 ───────────────────────── */
 
@@ -152,7 +152,7 @@ function renderUrlForTask(task) {
 
 // 不透明、按进程稳定：同一会话路由到同一后端，提升缓存命中（官方文档要求）。
 const OPENCODE_SESSION = crypto.randomUUID();
-const USER_AGENT = 'PixelScribe/1.6 (+https://github.com/pythonshiyi/pixelscribe)';
+const USER_AGENT = 'PixelScribe/1.7 (+https://github.com/pythonshiyi/pixelscribe)';
 
 /** 按端点返回需注入的默认请求头（仅 opencode.ai 需要会话头）。 */
 function gatewayHeaders(baseUrl) {

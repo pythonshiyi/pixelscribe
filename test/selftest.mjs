@@ -38,8 +38,9 @@ import {
 } from '../public/js/core/effects.js';
 import {
   resolveBackendId, controlMapDataURL, controlMaps, normalizeNeuralResponse, BACKEND_IDS,
-  cropBuffer, pasteBuffer, clampRect, maskMapDataURL,
+  cropBuffer, pasteBuffer, clampRect, maskMapDataURL, cropDataURL,
 } from '../public/js/core/backends.js';
+import { supersample, upscaleBilinear } from '../public/js/core/supersample.js';
 import {
   nearestColor, boxDownsample, nearestDownsample, unsharp, quantize, imageToPixels,
 } from '../public/js/io/img2pixel.js';
@@ -1915,6 +1916,104 @@ describe('参考图引导与多帧生成', () => {
   });
 });
 
+/* ═══════════════ 12.14 大画布：百分比坐标 / 超分 / 裁剪（v1.7） ═══════════════ */
+
+describe('百分比坐标', () => {
+  it('px / rect / circle 百分比换算', () => {
+    const d = new PixelDocument(100, 100);
+    let r = runScript('px 50% 50% c8', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.activeLayer.buffer.get(50, 50).a, 255);
+
+    r = runScript('rect 0% 0% 50% 50% c8 fill', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.activeLayer.buffer.get(0, 0).a, 255);
+    eq(d.activeLayer.buffer.get(49, 49).a, 255);
+    eq(d.activeLayer.buffer.get(50, 50).a, 0);
+
+    r = runScript('circle 50% 50% 25% c8 fill', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.activeLayer.buffer.get(50, 50).a, 255);
+    eq(d.activeLayer.buffer.get(50, 26).a, 255, '半径应为 25');
+  });
+
+  it('line / poly 百分比', () => {
+    const d = new PixelDocument(100, 50);
+    let r = runScript('line 0% 0% 100% 100% c8', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.activeLayer.buffer.get(0, 0).a, 255);
+    eq(d.activeLayer.buffer.get(99, 49).a, 255);
+
+    r = runScript('poly c8 fill 0% 0% 100% 0% 50% 100%', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.activeLayer.buffer.get(50, 40).a, 255);
+  });
+
+  it('非方形画布 x/y 各按自身维度', () => {
+    const d = new PixelDocument(100, 50);
+    runScript('px 100% 100% c8', d, { mode: 'replace' });
+    eq(d.activeLayer.buffer.get(99, 49).a, 255);
+  });
+
+  it('非法百分比报错但不中断', () => {
+    const d = new PixelDocument(20, 20);
+    const r = runScript('px abc% 5 c8\npx 5 5 c8', d, { mode: 'replace' });
+    eq(r.ok, false);
+    assert(r.errors[0].includes('line 1'), r.errors[0]);
+    eq(d.activeLayer.buffer.get(5, 5).a, 255, '后续行仍执行');
+  });
+});
+
+describe('大画布上限', () => {
+  it('支持到 2048 且超限报错', () => {
+    const d = new PixelDocument(16, 16);
+    const r = runScript('size 2048 2048\npx 0 0 c8', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    eq(d.width, 2048);
+    const r2 = runScript('size 4096 8', new PixelDocument(8, 8));
+    eq(r2.ok, false, '超过 2048 应报错');
+  });
+});
+
+describe('平滑超分', () => {
+  it('尺寸正确且同参数确定', () => {
+    const b = new PixelBuffer(8, 8);
+    b.clear({ r: 10, g: 120, b: 200, a: 255 });
+    const a1 = supersample(b, 4, { sharpen: 0.5, grain: 0.03, seed: 3 });
+    const a2 = supersample(b, 4, { sharpen: 0.5, grain: 0.03, seed: 3 });
+    eq(a1.width, 32);
+    eq(a1.height, 32);
+    eq(a1.diffCount(a2), 0, '同参数应完全确定');
+  });
+
+  it('透明区域保持透明', () => {
+    const b = new PixelBuffer(8, 8);
+    b.set(4, 4, { r: 255, g: 0, b: 0, a: 255 });
+    const up = supersample(b, 4, { sharpen: 0.4, grain: 0.02, seed: 1 });
+    eq(up.get(0, 0).a, 0, '远端角落应完全透明');
+    assert(up.get(16, 16).a > 0, '不透明像素处应有内容');
+  });
+
+  it('双线性产生中间灰（比最近邻平滑）', () => {
+    const b = new PixelBuffer(8, 8);
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      b.set(x, y, (x + y) % 2 ? { r: 255, g: 255, b: 255, a: 255 } : { r: 0, g: 0, b: 0, a: 255 });
+    }
+    const bil = upscaleBilinear(b, 4);
+    let mixed = 0;
+    for (let i = 0; i < bil.data.length; i += 4) { const v = bil.data[i]; if (v > 20 && v < 235) mixed++; }
+    assert(mixed > 0, '双线性应产生中间灰');
+  });
+
+  it('裁剪区域可导出并放大', () => {
+    const b = new PixelBuffer(64, 64);
+    b.fillRect(0, 0, 64, 64, { r: 1, g: 2, b: 3, a: 255 }, false);
+    const url = cropDataURL(b, { x: 8, y: 8, w: 16, h: 16 }, 64);
+    assert(url.startsWith('data:image/png;base64,iVBOR'), '应为 PNG');
+    eq(cropDataURL(b, { x: 100, y: 100, w: 4, h: 4 }), null, '越界返回 null');
+  });
+});
+
 /* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
 
 async function runIntegration() {
@@ -2176,6 +2275,58 @@ async function runIntegration() {
     eq(captured.body.task, 'inpaint');
     eq(captured.body.mask, 'm');
     eq(captured.body.reference, 'r');
+  });
+
+  // 大画布分块回灌
+  group = '端到端 · 大画布分块回灌';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const bigSeen = [];
+  const bigMock = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const p = JSON.parse(body);
+      bigSeen.push(p);
+      const assistants = p.messages.filter((m) => m.role === 'assistant').length;
+      const text = assistants < 1
+        ? '```pixelscript\nsize 256 256\nclear transparent\ncircle 128 128 70 c9 fill\ncircle 128 128 40 c10 fill\n```'
+        : 'DONE';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((r) => bigMock.listen(0, '127.0.0.1', r));
+  const bigDoc = new Doc(256, 256);
+  const bigAgent = new Agent({
+    provider: new Provider({ proxy: false, apiKey: 'k', baseUrl: `http://127.0.0.1:${bigMock.address().port}`, model: 'm' }),
+    renderer, doc: bigDoc, history: new Hist(bigDoc), maxIterations: 2, visionLongEdge: 256, detailCrops: true,
+  });
+  try { await bigAgent.run('大画布测试'); } catch (err) { failures.push({ group, name: '大画布闭环', err }); }
+  await new Promise((r) => bigMock.close(r));
+  check('大画布回灌附原分辨率裁剪图', () => {
+    eq(bigDoc.width, 256);
+    assert(bigSeen.length >= 2, `请求过少 ${bigSeen.length}`);
+    const last = bigSeen[1].messages[bigSeen[1].messages.length - 1];
+    assert(Array.isArray(last.content), '应为多模态数组');
+    const imgs = last.content.filter((p) => p.type === 'image_url');
+    assert(imgs.length >= 2, `应含整图 + 裁剪图，实际 ${imgs.length}`);
+    assert(last.content.some((p) => p.type === 'text' && p.text.includes('局部原分辨率放大')), '应含裁剪说明');
+  });
+
+  // 存储回退链
+  group = '端到端 · 存储回退';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const store = await import('../public/js/io/store.js');
+  const wrote = await store.storeSet('pixelscribe.test', JSON.stringify({ a: 1 }));
+  const got = await store.storeGet('pixelscribe.test');
+  await store.storeDel('pixelscribe.test');
+  const gone = await store.storeGet('pixelscribe.test');
+  check('storeSet / storeGet / storeDel 回退链可用', () => {
+    assert(wrote, '应写入成功');
+    eq(JSON.parse(got).a, 1);
+    eq(gone, null);
   });
 
   // 中止测试

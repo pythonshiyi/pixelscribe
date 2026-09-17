@@ -87,6 +87,10 @@ PX_PORT=8080 npm start
 | **多后端路由** | `PX_RENDER_URL` / `PX_INPAINT_URL` / `PX_UPSCALE_URL` 按任务路由到各自的神经后端 |
 | **动画帧** | 帧条增删/复制/排序/选择、播放预览、**洋葱皮**（前后帧半透明叠加）、**AI 生成 N 帧循环动画** |
 | **参考图引导** | 导入图片为参考层（不烘焙进成图），作为神经后端的 ControlNet 式引导 |
+| **大画布** | 画布最高 **2048²**；**百分比坐标**（`50%`）让模型不必心算大数字 |
+| **大画布回灌** | 画布超过阈值时，除整图外额外回灌**改动热区的原分辨率裁剪图**，让模型真正看见细节 |
+| **平滑超分导出** | 双线性 + 锐化 + 微纹理，把低分辨率画布"author small, render big"成写实大图 |
+| **大文档存储** | 自动保存优先写 **IndexedDB**（超 localStorage 配额也能存），回退 localStorage/内存 |
 | **导出多格式** | PNG / PixelScript，以及 **精灵表 PNG**、**GIF89a**（自带 LZW）、**Aseprite `.aseprite`** |
 | **白天主题** | 文档风浅色配色（纸感底 + 中性灰 + 像素粉/文档蓝），一键切换、记忆偏好 |
 | **作品库** | 生成物自动落盘到 `workspace/gallery`，内置面板可查看/下载/删除/打开文件夹 |
@@ -168,14 +172,16 @@ render photo
 │     ├─ io/gif.js          纯 JS GIF89a 编码器（LZW，多帧/透明/循环）
 │     ├─ io/aseprite.js     极简 Aseprite 写出器（单图层 + raw cel）
 │     ├─ io/img2pixel.js    参考图 → 像素画（降采样 / 量化 / 抖动 / 边缘）
+│     ├─ io/store.js        大文档持久化（IndexedDB → localStorage → 内存）
 │     ├─ core/              引擎：palette buffer document history renderer animation
 │     │                     effects（程序化光照/材质/色调） backends（控制图/裁剪/后端路由）
+│     │                     supersample（平滑超分）
 │     ├─ lang/              compiler（解析+执行） + font5x7
 │     ├─ ai/                provider（流式+视觉） prompts demo agent（闭环+导演）
 │     └─ ui/                dom app tools panels chat gallery
 └─ test/
-   ├─ selftest.mjs          单元 / 集成自测（221 项，含真实 HTTP 闭环、多帧生成、参考层与 GIF/Aseprite 编码）
-   └─ dom-smoke.mjs         jsdom 无头 UI 冒烟测试（66 项）
+   ├─ selftest.mjs          单元 / 集成自测（232 项，含百分比坐标、超分、大画布分块回灌与 GIF/Aseprite 编码）
+   └─ dom-smoke.mjs         jsdom 无头 UI 冒烟测试（69 项）
 ```
 
 ---
@@ -223,6 +229,14 @@ AI 面板的「风格」下拉支持 `像素 / 手绘 / 水墨 / 动画 / 3D / �
 - **吸附调色板**：量化到当前色板；**渐隐阈值**：剔除半透明脏边。
 
 结果按最大边等比缩放并居中写入当前图层。
+
+### 大画布与超分
+- 新建画布可选 **16–1024**；DSL `size` 上限 **2048²**；AI 面板画布最大 512。
+- **用百分比坐标**：`ellipse 50% 55% 30% 22% c9 fill`——x 按宽、y 按高、半径按长边换算，
+  模型在大画布上不必心算像素值，指令遵循更稳。
+- **平滑超分导出**：导出对话框勾选「平滑超分」，引擎用双线性 + 锐化 + 微纹理放大，
+  得到写实/绘画风格的大图（像素风请关闭，保持最近邻硬边）。
+- 画布超过 160px 时，闭环会额外回灌**改动最大区域的原始分辨率裁剪图**，弥补视觉 token 上限。
 
 ### 动画与导出
 画布底部的**帧条**：
@@ -302,7 +316,7 @@ AI 面板的「风格」下拉支持 `像素 / 手绘 / 水墨 / 动画 / 3D / �
 ## 测试
 
 ```bash
-npm test           # 单元 + 集成 + 无头 UI 冒烟（共 287 项）
+npm test           # 单元 + 集成 + 无头 UI 冒烟（共 301 项）
 npm run test:unit  # 仅单元 / 集成（无需浏览器，含真实 HTTP 闭环）
 npm run test:dom   # 仅 jsdom 无头 UI 冒烟
 ```

@@ -26,7 +26,7 @@ import {
 import { applyProceduralPipeline, normalizeStyle } from '../core/effects.js';
 import {
   resolveBackendId, requestNeural, controlMaps as buildControlMaps, bufferDataURL,
-  cropBuffer, pasteBuffer, maskMapDataURL, clampRect,
+  cropBuffer, pasteBuffer, maskMapDataURL, clampRect, cropDataURL,
 } from '../core/backends.js';
 import { PixelBuffer } from '../core/buffer.js';
 
@@ -110,6 +110,9 @@ export class Agent {
     // v1.6：多帧动画生成（1..64）
     this.frameCount = Math.max(1, Math.min(64, Number(opts.frameCount) || 1));
     this.animation = opts.animation || null;
+    // v1.7：大画布分块回灌（超过阈值时附原分辨率裁剪图）
+    this.detailCrops = opts.detailCrops !== false;
+    this.cropThreshold = Number(opts.cropThreshold) || 160;
     this.controller = null;
     this.iterations = [];
     this.running = false;
@@ -462,16 +465,26 @@ export class Agent {
           hasImage: this.visionEnabled,
         });
         messages.push({ role: 'assistant', content: text });
-        messages.push({
-          role: 'user',
-          content: this.visionEnabled
-            ? [
-                { type: 'text', text: critiqueText },
-                { type: 'image_url', image_url: { url: vision, detail: this.visionDetail } },
-              ]
-            : critiqueText,
-        });
-          i++;
+        let critiqueContent = critiqueText;
+        if (this.visionEnabled) {
+          const parts = [
+            { type: 'text', text: critiqueText },
+            { type: 'image_url', image_url: { url: vision, detail: this.visionDetail } },
+          ];
+          // 大画布：整图回灌会丢失细节，额外附上改动最大区域的原始分辨率裁剪图
+          if (this.detailCrops && Math.max(this.doc.width, this.doc.height) > this.cropThreshold) {
+            const hot = tiles.filter((t) => t.changed > 0).sort((a, b) => b.changed - a.changed).slice(0, 2);
+            for (const t of hot) {
+              const url = cropDataURL(this.doc.composite(), t, 192);
+              if (!url) continue;
+              parts.push({ type: 'text', text: `局部原分辨率放大：${t.label}（改动 ${t.changed} px）` });
+              parts.push({ type: 'image_url', image_url: { url, detail: 'high' } });
+            }
+          }
+          critiqueContent = parts;
+        }
+        messages.push({ role: 'user', content: critiqueContent });
+        i++;
         }
       }
     } catch (err) {
