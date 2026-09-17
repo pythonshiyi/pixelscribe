@@ -9,6 +9,7 @@ import { Renderer } from '../core/renderer.js';
 import { PixelBuffer } from '../core/buffer.js';
 import { Tools } from './tools.js';
 import { ChatPanel } from './chat.js';
+import { Gallery } from './gallery.js';
 import { initLayers, initPalette, initScript } from './panels.js';
 import { rgbaToHex } from '../util/color.js';
 import { runScript } from '../lang/compiler.js';
@@ -28,6 +29,7 @@ export class App {
     this.renderer.setDocument(this.doc);
     this.tools = new Tools(this);
     this.chat = new ChatPanel(this);
+    this.gallery = new Gallery(this);
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
 
     this._scratch = null;
@@ -48,6 +50,8 @@ export class App {
 
     this.chat.init();
     this.tools.attach($('#stage'));
+    this.applyTheme(this.settings.theme || 'dark', false);
+    this.gallery.init();
 
     this.bindTopbar();
     this.bindTabs();
@@ -204,6 +208,22 @@ export class App {
     this.updateStatus();
   }
 
+  /** 切换主题（dark / light），同步画布配色并持久化。 */
+  applyTheme(theme, persist = true) {
+    const t = theme === 'light' ? 'light' : 'dark';
+    this.settings.theme = t;
+    document.documentElement.dataset.theme = t;
+    this.renderer?.setTheme?.(t);
+    const btn = $('#btnTheme');
+    if (btn) {
+      btn.querySelector('use')?.setAttribute('href', t === 'light' ? '#i-moon' : '#i-sun');
+      btn.title = t === 'light' ? '切换到暗色主题' : '切换到白天主题';
+      btn.classList.toggle('on', t === 'light');
+    }
+    this.requestRender();
+    if (persist) this.saveSettings();
+  }
+
   setAiBadge() {
     const elx = $('#stAi');
     if (this.config.demoMode) {
@@ -251,6 +271,7 @@ export class App {
     $('#btnImport').addEventListener('click', () => $('#filePicker').click());
     $('#filePicker').addEventListener('change', (e) => this.importFile(e.target.files?.[0]));
     $('#btnExport').addEventListener('click', () => this.exportDialog());
+    $('#btnTheme').addEventListener('click', () => this.applyTheme(this.settings.theme === 'light' ? 'dark' : 'light'));
     $('#btnSettings').addEventListener('click', () => this.settingsDialog());
 
     for (const b of $$('.tool[data-tool]')) {
@@ -596,6 +617,7 @@ export class App {
       thinking: this.config.thinking ?? 'auto',
       vision: this.config.vision ?? 'auto',
       maxTokens: this.config.maxTokens ?? 2048,
+      theme: 'dark',
     };
   }
 
@@ -611,6 +633,7 @@ export class App {
       thinking: this.config?.thinking ?? 'auto',
       vision: this.config?.vision ?? 'auto',
       maxTokens: this.config?.maxTokens ?? 2048,
+      theme: 'dark',
     };
     try {
       const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');

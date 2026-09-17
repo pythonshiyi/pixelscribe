@@ -26,6 +26,11 @@ async function loadConfig() {
 
 async function boot() {
   const config = await loadConfig();
+  // 尽早应用主题，避免首帧闪白/闪黑
+  try {
+    const s = JSON.parse(localStorage.getItem('pixelscribe.settings.v1') || '{}');
+    if (s.theme === 'light') document.documentElement.dataset.theme = 'light';
+  } catch { /* 忽略 */ }
   const app = new App(config);
   try {
     await app.init();

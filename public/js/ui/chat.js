@@ -182,6 +182,7 @@ export class ChatPanel {
         this.reasonEl = null;
         this.reasonBody = null;
         this._reasonStarted = false;
+        if (!e.aborted && e.rounds > 0) this.app.gallery?.autoSave?.('ai');
         break;
       default:
         break;

@@ -493,6 +493,24 @@ ok('设置对话框可保存', () => {
   assert($('#modalBackdrop').hidden);
 });
 
+ok('主题切换（白天 / 暗色）', () => {
+  const root = window.document.documentElement;
+  app.applyTheme('light', false);
+  eq(root.dataset.theme, 'light');
+  eq(app.renderer.theme, 'light');
+  eq($('#btnTheme').querySelector('use').getAttribute('href'), '#i-moon');
+  app.applyTheme('dark', false);
+  eq(root.dataset.theme, 'dark');
+  eq(app.renderer.theme, 'dark');
+  eq(app.settings.theme, 'dark');
+});
+
+ok('作品面板存在（文件空间）', () => {
+  assert($('#galleryGrid'), '缺少 #galleryGrid');
+  assert($('#galleryPath'), '缺少 #galleryPath');
+  assert(window.document.querySelector('[data-pane="gallery"]'), '缺少作品 pane');
+});
+
 ok('示例库可载入', () => {
   $('#btnSamples').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert(!$('#modalBackdrop').hidden);

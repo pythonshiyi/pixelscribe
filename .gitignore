@@ -8,6 +8,9 @@ node_modules/
 # 测试产物
 out/
 
+# 作品库（生成物文件空间）
+workspace/
+
 # 编辑器 / 系统
 .vscode/
 .idea/

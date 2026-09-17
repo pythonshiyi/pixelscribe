@@ -125,6 +125,11 @@ rect 4 4 10 10 c8 fill         # 显式填充
 | 26 | `erase` | `erase X Y W H` |
 | 27 | `adjust` | `adjust X Y W H light\|dark AMOUNT` |
 | 28 | `text` | `text X Y COLOR "STRING" [SCALE]` |
+| 29 | `curve` | `curve X1 Y1 CX CY X2 Y2 COLOR [W]` |
+| 30 | `arc` | `arc CX CY R A0 A1 COLOR [W]` |
+| 31 | `shade` | `shade X Y W H COLOR [AMOUNT]` |
+| 32 | `bevel` | `bevel X Y W H [SIZE] [STRENGTH]` |
+| 33 | `graddither` | `graddither X Y W H C1 C2 [checker\|bayer\|h\|v] [v\|h]` |
 
 ---
 
@@ -333,6 +338,44 @@ adjust 10 8 6 4 light 0.4
 text 2 2 c7 "LV 12" 2
 ```
 
+### 4.3 精细化 / 可控扩展（v1.2）
+
+#### `curve X1 Y1 CX CY X2 Y2 COLOR [W]`
+二次贝塞尔曲线：起点 `(X1,Y1)`、控制点 `(CX,CY)`、终点 `(X2,Y2)`，`W` 为线宽（默认 1）。
+用于有机轮廓、叶形、毛发、飘带等直线/圆无法自然表达的曲线。
+```
+curve 4 28 16 2 28 28 c11 1     # 一片叶子
+curve 10 8 16 2 22 8 c7 2       # 一挑高光
+```
+
+#### `arc CX CY R A0 A1 COLOR [W]`
+圆弧描边。角度制：`0` 为右（3 点方向），`90` 为下，逆时针为负；`A1` 可小于 `A0`。
+```
+arc 16 16 12 200 340 c6 2       # 下半圈高光/裂纹
+```
+
+#### `shade X Y W H COLOR [AMOUNT]`
+区域内所有不透明像素**向 `COLOR` 线性靠拢** `AMOUNT`（0–1，默认 0.25）。
+相比 `adjust`（只提亮/压暗），`shade` 能选定色相，是「同色系阴影/受光」的可控做法。
+```
+shade 4 18 24 8 c1 0.35         # 底部沉入深蓝阴影
+shade 10 8 12 4 c7 0.2          # 顶部向白受光
+```
+
+#### `bevel X Y W H [SIZE] [STRENGTH]`
+立体浮雕：区域**左上边缘受光、右下边缘阴影**，`SIZE` 为边缘宽度（默认 2），
+`STRENGTH` 为强度（默认 0.3）。给道具、按钮、宝石快速加体积感。
+```
+bevel 2 2 12 12 2 0.35
+```
+
+#### `graddither X Y W H C1 C2 [checker|bayer|h|v] [v|h]`
+**抖动渐变**：沿方向用有序抖动在 `C1→C2` 之间过渡，像素画表现天空/光照的经典手法，
+比 `grad` 更有像素质感（不产生连续色带）。
+```
+graddither 0 0 64 32 c12 c7 bayer v
+```
+
 ---
 
 ## 5. 执行语义
@@ -452,3 +495,4 @@ noise 0 0 64 40 c7 0.02
 | 版本 | 变更 |
 |---|---|
 | 1.0 | 初始 28 条指令，5 套调色板，5×7 字体，容错执行与执行报告 |
+| 1.2 | 新增 5 条精细化指令：`curve`（贝塞尔）/`arc`（圆弧）/`shade`（同色系着色）/`bevel`（浮雕）/`graddither`（抖动渐变），共 33 条 |

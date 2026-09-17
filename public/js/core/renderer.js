@@ -8,11 +8,25 @@
 
 import { encodePNG, encodePNGScaled, toBase64 } from '../io/png.js';
 
-const CHECKER_LIGHT = '#3a3a44';
-const CHECKER_DARK = '#2b2b33';
-const GRID_COLOR = 'rgba(255,255,255,0.10)';
-const GRID_COLOR_STRONG = 'rgba(255,255,255,0.22)';
-const SYM_COLOR = 'rgba(255,120,200,0.85)';
+/** 与 UI 主题配套的画布配色（棋盘底 / 网格 / 边框 / 对称轴）。 */
+const THEMES = {
+  dark: {
+    checkerLight: '#3a3a44',
+    checkerDark: '#2b2b33',
+    grid: 'rgba(255,255,255,0.10)',
+    gridStrong: 'rgba(255,255,255,0.22)',
+    border: 'rgba(255,255,255,0.35)',
+    sym: 'rgba(255,120,200,0.85)',
+  },
+  light: {
+    checkerLight: '#eceee6',
+    checkerDark: '#dfe2d6',
+    grid: 'rgba(31,35,40,0.10)',
+    gridStrong: 'rgba(31,35,40,0.22)',
+    border: 'rgba(31,35,40,0.28)',
+    sym: 'rgba(214,71,138,0.85)',
+  },
+};
 
 export class Renderer {
   /** @param {HTMLCanvasElement} canvas */
@@ -40,7 +54,18 @@ export class Renderer {
     this.checkerSize = 6;
     this._checkerPattern = null;
     this._overlayCanvas = document.createElement('canvas');
+    this.theme = 'dark';
   }
+
+  /** 切换画布配色主题（dark / light）。 */
+  setTheme(name) {
+    const next = name === 'light' ? 'light' : 'dark';
+    if (next === this.theme) return;
+    this.theme = next;
+    this._checkerPattern = null;
+  }
+
+  get colors() { return THEMES[this.theme] || THEMES.dark; }
 
   setDocument(doc) {
     this.doc = doc;
@@ -113,13 +138,14 @@ export class Renderer {
   }
 
   _makeChecker() {
+    const T = this.colors;
     const c = document.createElement('canvas');
     c.width = this.checkerSize * 2;
     c.height = this.checkerSize * 2;
     const g = c.getContext('2d');
-    g.fillStyle = CHECKER_LIGHT;
+    g.fillStyle = T.checkerLight;
     g.fillRect(0, 0, c.width, c.height);
-    g.fillStyle = CHECKER_DARK;
+    g.fillStyle = T.checkerDark;
     g.fillRect(0, 0, this.checkerSize, this.checkerSize);
     g.fillRect(this.checkerSize, this.checkerSize, this.checkerSize, this.checkerSize);
     return this.ctx.createPattern(c, 'repeat');
@@ -130,6 +156,7 @@ export class Renderer {
   render() {
     const { ctx, canvas } = this;
     const doc = this.doc;
+    const T = this.colors;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -173,7 +200,7 @@ export class Renderer {
     if (this.grid && this.scale >= 5) {
       ctx.lineWidth = 1;
       for (let x = 0; x <= doc.width; x++) {
-        ctx.strokeStyle = x % 8 === 0 ? GRID_COLOR_STRONG : GRID_COLOR;
+        ctx.strokeStyle = x % 8 === 0 ? T.gridStrong : T.grid;
         const px = ox + x * this.scale + 0.5;
         ctx.beginPath();
         ctx.moveTo(px, oy);
@@ -181,7 +208,7 @@ export class Renderer {
         ctx.stroke();
       }
       for (let y = 0; y <= doc.height; y++) {
-        ctx.strokeStyle = y % 8 === 0 ? GRID_COLOR_STRONG : GRID_COLOR;
+        ctx.strokeStyle = y % 8 === 0 ? T.gridStrong : T.grid;
         const py = oy + y * this.scale + 0.5;
         ctx.beginPath();
         ctx.moveTo(ox, py);
@@ -192,13 +219,13 @@ export class Renderer {
 
     ctx.restore();
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.strokeStyle = T.border;
     ctx.lineWidth = 1;
     ctx.strokeRect(ox + 0.5, oy + 0.5, w - 1, h - 1);
 
     if (this.showSymmetry && doc.symmetry !== 'off') {
       ctx.save();
-      ctx.strokeStyle = SYM_COLOR;
+      ctx.strokeStyle = T.sym;
       ctx.setLineDash([6, 4]);
       ctx.lineWidth = 1;
       const mid = (n) => ox + ((n - 1) / 2) * this.scale + this.scale / 2 + 0.5;

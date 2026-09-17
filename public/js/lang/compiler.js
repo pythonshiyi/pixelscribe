@@ -13,8 +13,9 @@ import {
   drawLine, fillEllipse, strokeEllipse, drawRRect, fillPoly, floodFill,
   outline as outlineOp, dither as ditherOp, noise as noiseOp, linearGrad,
   flipBuffer, rotateBuffer, symmetryTransforms, mulberry32,
+  drawBezier, arcPoints, ditherGradient,
 } from '../core/buffer.js';
-import { parseColor, adjust as adjustColor } from '../util/color.js';
+import { parseColor, adjust as adjustColor, mix } from '../util/color.js';
 import { Palette } from '../core/palette.js';
 import { glyph, GLYPH_W, GLYPH_H } from './font5x7.js';
 
@@ -581,6 +582,105 @@ export const COMMANDS = {
         }
         cx += (GLYPH_W + 1) * sc;
       }
+    },
+  },
+
+  /* ── 精细化/可控扩展（v1.2）── */
+  curve: {
+    min: 7, max: 8,
+    doc: 'curve X1 Y1 CX CY X2 Y2 COLOR [W] —— 二次贝塞尔曲线（有机轮廓/叶形/飘带）',
+    run(ctx, a) {
+      const x1 = num(a[0]), y1 = num(a[1]), cx = num(a[2]), cy = num(a[3]);
+      const x2 = num(a[4]), y2 = num(a[5]);
+      const c = color(a[6], ctx.palette);
+      const w = Math.max(1, Math.round(numOr(a[7], 1)));
+      eachMirror(ctx, (t) => {
+        const [ax, ay] = t(x1, y1);
+        const [bx, by] = t(cx, cy);
+        const [dx, dy] = t(x2, y2);
+        drawBezier(ctx.buf, ax, ay, bx, by, dx, dy, c, w);
+      });
+    },
+  },
+
+  arc: {
+    min: 6, max: 7,
+    doc: 'arc CX CY R A0 A1 COLOR [W] —— 圆弧（角度制：0=右 90=下）',
+    run(ctx, a) {
+      const cx = num(a[0]), cy = num(a[1]), r = Math.abs(num(a[2]));
+      const a0 = num(a[3]), a1 = num(a[4]);
+      const c = color(a[5], ctx.palette);
+      const w = Math.max(1, Math.round(numOr(a[6], 1)));
+      const pts = arcPoints(cx, cy, r, a0, a1);
+      eachMirror(ctx, (t) => {
+        for (let i = 0; i + 3 < pts.length; i += 2) {
+          const [ax, ay] = t(pts[i], pts[i + 1]);
+          const [bx, by] = t(pts[i + 2], pts[i + 3]);
+          drawLine(ctx.buf, ax, ay, bx, by, c, w);
+        }
+      });
+    },
+  },
+
+  shade: {
+    min: 5, max: 6,
+    doc: 'shade X Y W H COLOR [AMOUNT] —— 区域整体向 COLOR 靠拢（同色系受光/阴影，比 adjust 更可控）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const target = color(a[4], ctx.palette);
+      const amount = Math.max(0, Math.min(1, numOr(a[5], 0.25)));
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        for (let y = q.y; y < q.y + q.h; y++) {
+          for (let x = q.x; x < q.x + q.w; x++) {
+            if (!ctx.buf.inBounds(x, y)) continue;
+            const cur = ctx.buf.get(x, y);
+            if (cur.a === 0) continue;
+            ctx.buf.set(x, y, mix(cur, target, amount));
+          }
+        }
+      });
+    },
+  },
+
+  bevel: {
+    min: 4, max: 6,
+    doc: 'bevel X Y W H [SIZE] [STRENGTH] —— 立体浮雕（左上受光、右下阴影，给道具/按钮加体积）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const size = Math.max(1, Math.round(numOr(a[4], 2)));
+      const strength = Math.max(0, Math.min(1, numOr(a[5], 0.3)));
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        for (let y = q.y; y < q.y + q.h; y++) {
+          for (let x = q.x; x < q.x + q.w; x++) {
+            if (!ctx.buf.inBounds(x, y)) continue;
+            const cur = ctx.buf.get(x, y);
+            if (cur.a === 0) continue;
+            const lightAmt = Math.max(0, 1 - Math.min(x - q.x, y - q.y) / size);
+            const darkAmt = Math.max(0, 1 - Math.min(q.x + q.w - 1 - x, q.y + q.h - 1 - y) / size);
+            if (lightAmt <= 0 && darkAmt <= 0) continue;
+            ctx.buf.set(x, y, lightAmt >= darkAmt
+              ? adjustColor(cur, 'light', strength * lightAmt)
+              : adjustColor(cur, 'dark', strength * darkAmt));
+          }
+        }
+      });
+    },
+  },
+
+  graddither: {
+    min: 6, max: 8,
+    doc: 'graddither X Y W H C1 C2 [checker|bayer|h|v] [v|h] —— 抖动渐变（比 grad 更像素、更有质感）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const c1 = color(a[4], ctx.palette), c2 = color(a[5], ctx.palette);
+      const pat = mode(a[6], ['checker', 'bayer', 'h', 'v'], 'bayer');
+      const dir = mode(a[7], ['v', 'h', 'vertical', 'horizontal'], 'v');
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        ditherGradient(ctx.buf, q.x, q.y, q.w, q.h, c1, c2, pat, dir.startsWith('h') ? 'h' : 'v');
+      });
     },
   },
 };

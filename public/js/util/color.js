@@ -130,6 +130,21 @@ export function luminance(c) {
 }
 
 /**
+ * 线性插值混合：t=0 取 a，t=1 取 b
+ * @param {RGBA} a @param {RGBA} b @param {number} t
+ * @returns {RGBA}
+ */
+export function mix(a, b, t) {
+  const k = Math.max(0, Math.min(1, t));
+  return {
+    r: clamp255(Math.round(a.r + (b.r - a.r) * k)),
+    g: clamp255(Math.round(a.g + (b.g - a.g) * k)),
+    b: clamp255(Math.round(a.b + (b.b - a.b) * k)),
+    a: clamp255(Math.round(a.a + (b.a - a.a) * k)),
+  };
+}
+
+/**
  * 提亮 / 压暗
  * @param {RGBA} c
  * @param {'light'|'dark'} mode

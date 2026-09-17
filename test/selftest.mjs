@@ -442,8 +442,8 @@ describe('PixelScript 词法', () => {
     eq(t[1].value, 'A "B"');
   });
 
-  it('指令表规模符合文档（28 条）', () => {
-    eq(Object.keys(COMMANDS).length, 28);
+  it('指令表规模符合文档（33 条）', () => {
+    eq(Object.keys(COMMANDS).length, 33);
   });
 
   it('dslReference 列出全部指令', () => {
@@ -733,6 +733,60 @@ describe('PixelScript 全部指令', () => {
     exec('text 0 0 c7 "A" 2', d);
     const two = d.activeLayer.buffer.opaqueCount();
     eq(two, one * 4, '2 倍缩放像素数应为 4 倍');
+  });
+
+  it('curve 二次贝塞尔曲线', () => {
+    const d = new PixelDocument(32, 32);
+    const r = exec('curve 2 30 16 2 30 30 c8', d);
+    assert(r.ok, r.errors.join('; '));
+    assert(d.activeLayer.buffer.opaqueCount() > 40, `曲线像素过少 ${d.activeLayer.buffer.opaqueCount()}`);
+  });
+
+  it('arc 圆弧角度范围（0=右 90=下）', () => {
+    const d = new PixelDocument(32, 32);
+    const r = exec('arc 16 16 10 0 90 c8', d);
+    assert(r.ok, r.errors.join('; '));
+    eq(d.activeLayer.buffer.get(26, 16).a, 255, '起点 (r,0) 应有点');
+    eq(d.activeLayer.buffer.get(16, 26).a, 255, '终点 (0,r) 应有点');
+    eq(d.activeLayer.buffer.get(6, 16).a, 0, '左象限不应有点');
+    eq(d.activeLayer.buffer.get(16, 6).a, 0, '上象限不应有点');
+  });
+
+  it('shade 向目标色靠拢', () => {
+    const d = new PixelDocument(8, 8);
+    exec('bg c11', d);                                                  // 绿 #00e436
+    const flat = d.activeLayer.buffer.get(4, 4);
+    const r = runScript('shade 0 0 8 8 c1 0.5', d, { mode: 'append' }); // 向深蓝靠拢
+    assert(r.ok, r.errors.join('; '));
+    const px = d.activeLayer.buffer.get(4, 4);
+    assert(px.b > flat.b && px.r > flat.r, `应向深蓝偏移：${JSON.stringify(flat)} → ${JSON.stringify(px)}`);
+  });
+
+  it('bevel 左上提亮、右下压暗', () => {
+    const d = new PixelDocument(16, 16);
+    exec('rect 2 2 12 12 c5 fill', d);
+    const flat = d.activeLayer.buffer.get(3, 3);
+    const r = runScript('bevel 2 2 12 12 3 0.4', d, { mode: 'append' });
+    assert(r.ok, r.errors.join('; '));
+    const tl = d.activeLayer.buffer.get(2, 2);
+    const br = d.activeLayer.buffer.get(13, 13);
+    const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    assert(lum(tl) > lum(flat), `左上应提亮 ${lum(tl)} <= ${lum(flat)}`);
+    assert(lum(br) < lum(flat), `右下应压暗 ${lum(br)} >= ${lum(flat)}`);
+  });
+
+  it('graddither 抖动渐变（两端为纯色，中段抖动不插值）', () => {
+    const d = new PixelDocument(32, 32);
+    const r = exec('graddither 0 0 32 32 c0 c7 bayer v', d);
+    assert(r.ok, r.errors.join('; '));
+    assert(d.activeLayer.buffer.get(16, 0).r < 64, '顶部应接近 C1（黑）');
+    assert(d.activeLayer.buffer.get(16, 31).r > 192, '底部应接近 C2（白）');
+    let mid = 0;
+    for (let x = 0; x < 32; x++) {
+      const c = d.activeLayer.buffer.get(x, 16);
+      if (c.r > 64 && c.r < 192) mid++;
+    }
+    eq(mid, 0, '抖动像素非黑即白，不应出现灰阶插值');
   });
 
   it('未知指令定位到行号', () => {

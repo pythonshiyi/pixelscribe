@@ -21,11 +21,12 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 /* ───────────────────────── .env 加载 ───────────────────────── */
 
@@ -154,6 +155,79 @@ const MIME = {
 };
 
 const MAX_BODY = 8 * 1024 * 1024;
+
+/* ───────────────────────── 作品库（专门的文件空间） ───────────────────────── */
+// 生成物自动落盘到 <repo>/workspace/gallery，便于集中查看/管理；路径可用 PX_WORKSPACE 覆盖。
+const WORKSPACE_DIR = path.resolve(process.env.PX_WORKSPACE || path.join(__dirname, 'workspace'));
+const GALLERY_DIR = path.join(WORKSPACE_DIR, 'gallery');
+const GALLERY_MIME = { '.png': 'image/png', '.pxs': 'text/plain; charset=utf-8', '.json': 'application/json; charset=utf-8' };
+const GALLERY_MAX_BYTES = 32 * 1024 * 1024;
+
+try { fs.mkdirSync(GALLERY_DIR, { recursive: true }); } catch { /* 只读环境 */ }
+
+/** 只保留安全文件名（防路径穿越）。 */
+function safeGalleryName(name) {
+  const base = path.basename(String(name || '')).replace(/[^\w.\-]+/g, '_').slice(0, 80);
+  return base && base !== '.' && base !== '..' ? base : '';
+}
+
+async function listGallery() {
+  const items = [];
+  const entries = await fsp.readdir(GALLERY_DIR, { withFileTypes: true }).catch(() => []);
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    const ext = path.extname(e.name).toLowerCase();
+    if (!(ext in GALLERY_MIME)) continue;
+    const st = await fsp.stat(path.join(GALLERY_DIR, e.name)).catch(() => null);
+    if (!st) continue;
+    items.push({
+      name: e.name, size: st.size, mtime: st.mtimeMs,
+      kind: ext === '.pxs' ? 'script' : 'image',
+      url: `/api/gallery/file/${encodeURIComponent(e.name)}`,
+    });
+  }
+  items.sort((a, b) => b.mtime - a.mtime);
+  return items;
+}
+
+async function handleGallerySave(req, res) {
+  let payload;
+  try { payload = JSON.parse(await readBody(req)); }
+  catch { return sendJSON(res, 400, { error: 'BAD_JSON' }); }
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const kind = payload.kind === 'pxs' ? 'pxs' : 'png';
+  let name = safeGalleryName(payload.name) || `pixelscribe_${stamp}`;
+  if (!name.toLowerCase().endsWith(`.${kind}`)) name += `.${kind}`;
+  const full = path.join(GALLERY_DIR, name);
+  try {
+    if (kind === 'png') {
+      const m = /^data:image\/png;base64,(.+)$/s.exec(String(payload.dataURL || ''));
+      if (!m) return sendJSON(res, 400, { error: 'BAD_DATAURL', message: '需要 data:image/png;base64,... 的 PNG dataURL' });
+      const buf = Buffer.from(m[1], 'base64');
+      if (buf.length > GALLERY_MAX_BYTES) return sendJSON(res, 413, { error: 'TOO_LARGE' });
+      await fsp.writeFile(full, buf);
+    } else {
+      const text = String(payload.text ?? '');
+      if (Buffer.byteLength(text, 'utf8') > GALLERY_MAX_BYTES) return sendJSON(res, 413, { error: 'TOO_LARGE' });
+      await fsp.writeFile(full, text, 'utf8');
+    }
+  } catch (e) {
+    return sendJSON(res, 500, { error: 'WRITE_FAILED', message: e.message });
+  }
+  return sendJSON(res, 200, { ok: true, name, url: `/api/gallery/file/${encodeURIComponent(name)}` });
+}
+
+/** 在系统文件管理器中打开作品库目录。 */
+function revealWorkspace(res) {
+  try {
+    if (process.platform === 'win32') spawn('explorer', [GALLERY_DIR], { detached: true, stdio: 'ignore' }).unref();
+    else if (process.platform === 'darwin') spawn('open', [GALLERY_DIR], { detached: true, stdio: 'ignore' }).unref();
+    else spawn('xdg-open', [GALLERY_DIR], { detached: true, stdio: 'ignore' }).unref();
+    return sendJSON(res, 200, { ok: true, dir: GALLERY_DIR });
+  } catch (e) {
+    return sendJSON(res, 500, { error: 'REVEAL_FAILED', message: e.message, dir: GALLERY_DIR });
+  }
+}
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { 'Cache-Control': 'no-store', ...headers });
@@ -351,6 +425,8 @@ const server = http.createServer(async (req, res) => {
       vision: CFG.vision,
       provider: isOpencodeEndpoint(CFG.baseUrl) ? 'opencode' : (isOfficialEndpoint(CFG.baseUrl) ? 'deepseek' : 'openai-compatible'),
       gateway: { opencode: isOpencodeEndpoint(CFG.baseUrl), official: isOfficialEndpoint(CFG.baseUrl) },
+      workspace: WORKSPACE_DIR,
+      galleryDir: GALLERY_DIR,
       demoMode: !CFG.apiKey,
       version: VERSION,
     });
@@ -359,6 +435,50 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/chat') {
     if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
     return handleChat(req, res);
+  }
+
+  /* ── 作品库（文件空间） ── */
+  if (url.pathname === '/api/gallery') {
+    if (req.method !== 'GET') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    const items = await listGallery();
+    return sendJSON(res, 200, { workspace: WORKSPACE_DIR, dir: GALLERY_DIR, items });
+  }
+
+  if (url.pathname.startsWith('/api/gallery/file/')) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    const raw = decodeURIComponent(url.pathname.slice('/api/gallery/file/'.length));
+    const name = safeGalleryName(raw);
+    const ext = path.extname(name).toLowerCase();
+    if (!name || !(ext in GALLERY_MIME)) return send(res, 404, 'Not Found');
+    try {
+      const data = await fsp.readFile(path.join(GALLERY_DIR, name));
+      return send(res, 200, data, {
+        'Content-Type': GALLERY_MIME[ext], 'Content-Length': data.length, 'Cache-Control': 'no-cache',
+      });
+    } catch {
+      return send(res, 404, 'Not Found');
+    }
+  }
+
+  if (url.pathname === '/api/gallery/save') {
+    if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    return handleGallerySave(req, res);
+  }
+
+  if (url.pathname === '/api/gallery/reveal') {
+    if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    return revealWorkspace(res);
+  }
+
+  if (url.pathname === '/api/gallery/delete') {
+    if (req.method !== 'POST') return sendJSON(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+    let payload;
+    try { payload = JSON.parse(await readBody(req)); } catch { return sendJSON(res, 400, { error: 'BAD_JSON' }); }
+    const name = safeGalleryName(payload.name);
+    if (!name) return sendJSON(res, 400, { error: 'BAD_NAME' });
+    try { await fsp.unlink(path.join(GALLERY_DIR, name)); }
+    catch (e) { return sendJSON(res, 404, { error: 'NOT_FOUND', message: e.message }); }
+    return sendJSON(res, 200, { ok: true });
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {

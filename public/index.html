@@ -43,6 +43,9 @@
   <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M4 18l5-5 4 4 3-3 4 4"/></symbol>
   <symbol id="i-sym" viewBox="0 0 24 24"><path d="M12 3v18" stroke-dasharray="3 2"/><path d="M8 7L4 12l4 5M16 7l4 5-4 5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -82,6 +85,7 @@
     <button class="tb" id="btnNew" title="新建"><svg><use href="#i-plus"/></svg></button>
     <button class="tb" id="btnImport" title="导入图片 / 脚本"><svg><use href="#i-upload"/></svg></button>
     <button class="tb" id="btnExport" title="导出 PNG"><svg><use href="#i-download"/></svg></button>
+    <button class="tb" id="btnTheme" title="切换到白天主题"><svg><use href="#i-sun"/></svg></button>
     <button class="tb" id="btnSettings" title="设置"><svg><use href="#i-gear"/></svg></button>
   </div>
 </header>
@@ -133,6 +137,7 @@
       <button class="tab" data-tab="script"><svg><use href="#i-code"/></svg><span>脚本</span></button>
       <button class="tab" data-tab="layers"><svg><use href="#i-layers"/></svg><span>图层</span></button>
       <button class="tab" data-tab="palette"><svg><use href="#i-palette"/></svg><span>色板</span></button>
+      <button class="tab" data-tab="gallery"><svg><use href="#i-folder"/></svg><span>作品</span></button>
     </nav>
 
     <div class="panes">
@@ -240,6 +245,18 @@ outline c1"></textarea>
           </div>
         </div>
         <p class="hint">提示：在画布上按住 <kbd>Alt</kbd> 点击可取色；点击色块编辑该索引的颜色。</p>
+      </div>
+
+      <!-- ── 作品（专门的文件空间） ── -->
+      <div class="pane" data-pane="gallery">
+        <div class="pane-toolbar">
+          <button class="btn small" id="btnGalleryRefresh"><svg><use href="#i-refresh"/></svg><span>刷新</span></button>
+          <button class="btn small ghost" id="btnGallerySave"><svg><use href="#i-download"/></svg><span>存入作品</span></button>
+          <div class="flex-spacer"></div>
+          <button class="btn small ghost" id="btnGalleryReveal" title="在系统文件管理器中打开作品目录"><svg><use href="#i-folder"/></svg><span>打开文件夹</span></button>
+        </div>
+        <div class="gallery-path" id="galleryPath">—</div>
+        <div class="gallery-grid" id="galleryGrid"></div>
       </div>
     </div>
   </aside>

@@ -31,14 +31,16 @@ ${dslReference()}
 - 语义名：red blue white darkgreen … / transparent
 
 # 绘制策略（非常重要）
-1. **不要逐像素描摹**。用 ellipse / circle / rect / poly / grad 等图元组合出形状。
+1. **不要逐像素描摹**。用 ellipse / circle / rect / poly / curve / arc 等图元组合出形状。
 2. 先定 3–6 种颜色的配色，再定大形，最后补细节。
 3. 对称物体（角色、道具、徽章）务必使用 sym x 或 sym xy，可减少一半指令并保证对称。
 4. 最后用 outline c0 或 outline c1 描边，可显著提升可读性。
-5. 阴影用同色系更深的颜色 + dither 抖动，而不是直接用黑。
-6. 高光用 adjust 提亮或直接用小面积浅色。
-7. 所有绘制坐标必须在 0 … ${docInfo.width - 1} / 0 … ${docInfo.height - 1} 范围内。
-8. 圆/椭圆半径取画布尺寸的 1/4 ~ 1/3 通常比较好看。
+5. **阴影/受光用 shade**：shade X Y W H 同色系深色 0.3 比 adjust 更可控（保持色相）；配合 dither 摆脱死黑。
+6. **立体感用 bevel**：给道具、按钮、宝石加 bevel X Y W H 2 0.3（左上受光、右下阴影）。
+7. **渐变用 graddither**：天空/光照过渡用 graddither X Y W H C1 C2 bayer v，比 grad 更有像素质感。
+8. **有机曲线用 curve / arc**：叶形、毛发、飘带用 curve，圆角高光用 arc（角度制）。
+9. 高光用 adjust 提亮或直接用小面积浅色；圆/椭圆半径取画布尺寸的 1/4 ~ 1/3 通常比较好看。
+10. 所有绘制坐标必须在 0 … ${docInfo.width - 1} / 0 … ${docInfo.height - 1} 范围内。
 
 # 输出契约
 - **只输出一个 \`\`\`pixelscript 代码块**，不要输出 JSON、不要输出解释性的多段文字。

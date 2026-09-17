@@ -276,6 +276,65 @@ export function drawRRect(buf, x, y, w, h, r, c, mode = 'fill', width = 1) {
   }
 }
 
+/**
+ * 二次贝塞尔曲线（离散折线近似）——用于有机轮廓、叶形、飘带等
+ * @param {PixelBuffer} buf
+ * @param {number} x1 @param {number} y1 起点
+ * @param {number} cx @param {number} cy 控制点
+ * @param {number} x2 @param {number} y2 终点
+ * @param {RGBA} c @param {number} [width]
+ */
+export function drawBezier(buf, x1, y1, cx, cy, x2, y2, c, width = 1) {
+  const len = Math.hypot(cx - x1, cy - y1) + Math.hypot(x2 - cx, y2 - cy);
+  const steps = Math.max(8, Math.min(512, Math.ceil(len)));
+  let px = x1, py = y1;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps, u = 1 - t;
+    const x = u * u * x1 + 2 * u * t * cx + t * t * x2;
+    const y = u * u * y1 + 2 * u * t * cy + t * t * y2;
+    drawLine(buf, px, py, x, y, c, width);
+    px = x; py = y;
+  }
+}
+
+/**
+ * 采样圆弧为点序列（角度制，屏幕 y 向下）。返回扁平 [x0,y0,x1,y1,...]。
+ * 调用方自行决定是否套用对称变换（逐点变换才正确）。
+ * @param {number} cx @param {number} cy @param {number} r
+ * @param {number} a0 @param {number} a1 起止角度（度）
+ * @returns {number[]}
+ */
+export function arcPoints(cx, cy, r, a0, a1) {
+  const rad = Math.PI / 180;
+  const deg = a1 - a0;
+  const steps = Math.max(6, Math.min(2048, Math.ceil((Math.abs(deg) * Math.max(1, Math.abs(r))) / 24)));
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = (a0 + (deg * i) / steps) * rad;
+    pts.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+  }
+  return pts;
+}
+
+/**
+ * 抖动渐变：沿方向用有序抖动在 C1→C2 之间过渡（像素画表现光照/天色的经典手法）。
+ * @param {PixelBuffer} buf
+ * @param {string} pattern checker | bayer | h | v
+ * @param {'v'|'h'} dir
+ */
+export function ditherGradient(buf, x, y, w, h, c1, c2, pattern = 'bayer', dir = 'v') {
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  const span = dir === 'h' ? w : h;
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const t = span <= 1 ? 0 : (dir === 'h' ? px : py) / (span - 1);
+      const gx = x + px, gy = y + py;
+      buf.set(gx, gy, ditherThreshold(pattern, gx, gy) < t ? c2 : c1);
+    }
+  }
+}
+
 /** 扫描线填充多边形（奇偶规则） @param {PixelBuffer} buf @param {number[]} pts */
 export function fillPoly(buf, pts, c) {
   const n = pts.length / 2;
