@@ -653,22 +653,80 @@ export function runScript(source, doc, options = {}) {
   return ctx.report;
 }
 
+const FENCE_LANGS = new Set(['', 'pixelscript', 'px', 'pxs', 'pix', 'text']);
+
+function _firstToken(line) {
+  return String(line || '').trim().split(/\s+/)[0].toLowerCase();
+}
+
+/** 至少两条「首 token 是已知指令」的有效行，才认为像脚本（防把散文当脚本）。 */
+function _looksLikeScript(src) {
+  let n = 0;
+  for (const l of String(src).split(/\r?\n/)) {
+    const t = l.trim();
+    if (!t || t.startsWith('#') || t.startsWith('//')) continue;
+    if (Object.prototype.hasOwnProperty.call(COMMANDS, _firstToken(t))) n++;
+  }
+  return n >= 2;
+}
+
 /**
  * 从模型回复中抽取 PixelScript 代码块
+ *
+ * 兼容三类输出：标准围栏（闭合围栏可缺失，适配流式截断）、语言标签与首行同行、
+ * 以及无围栏时的「纯指令行」兜底（仅接受首 token 是已知指令的行，绝不执行散文）。
  * @param {string} text
  * @returns {string|null}
  */
 export function extractScript(text) {
   if (!text) return null;
-  const fence = /```(?:pixelscript|px|pxs|pix|text)?\s*\n([\s\S]*?)```/i.exec(text);
-  if (fence) return fence[1].trim();
-  const lines = text.split(/\r?\n/).filter((l) => /^\s*\S+\s/.test(l) && !/^\s*(#|\/\/)/.test(l));
-  return lines.length >= 2 ? lines.join('\n').trim() : null;
+  const s = String(text);
+
+  // 1) 标准围栏
+  const re = /```[ \t]*([A-Za-z0-9_-]*)[ \t]*\r?\n([\s\S]*?)(?:```|$)/g;
+  const candidates = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (FENCE_LANGS.has(m[1].toLowerCase())) candidates.push(m[2]);
+  }
+  if (candidates.length) {
+    const best = candidates.find((c) => _looksLikeScript(c)) || candidates[0];
+    const t = String(best).trim();
+    if (t) return t;
+  }
+
+  // 2) 语言标签与首行同行：```pixelscript size 32 32
+  const inline = /```[ \t]*(?:pixelscript|px|pxs|pix)[ \t]+([^\n]*)(?:\r?\n([\s\S]*?))?(?:```|$)/i.exec(s);
+  if (inline) {
+    const t = `${inline[1] || ''}\n${inline[2] || ''}`.trim();
+    if (t) return t;
+  }
+
+  // 3) 兜底：仅取已知指令行，且必须含 size
+  const lines = s.split(/\r?\n/).filter((l) => {
+    const t = l.trim();
+    if (!t || t.startsWith('#') || t.startsWith('//')) return false;
+    return Object.prototype.hasOwnProperty.call(COMMANDS, _firstToken(t));
+  });
+  if (lines.length >= 2 && lines.some((l) => _firstToken(l) === 'size')) {
+    return lines.join('\n').trim();
+  }
+  return null;
 }
 
-/** 回复是否表示完成 */
+/**
+ * 回复是否表示完成。
+ * 只要回复里还有可执行脚本，就不算完成（防止「脚本 + DONE」被误判为收工）；
+ * 否则容忍结尾多一句说明，任意一行是单独的 done/完成 即判定完成。
+ */
 export function isDone(text) {
-  return /(^|\n)\s*(done|完成|finished)\s*[.!。!]?\s*$/i.test(String(text ?? '').trim());
+  const s = String(text ?? '').trim();
+  if (!s) return false;
+  if (extractScript(s)) return false;
+  return s.split(/\r?\n/).some((l) => {
+    const t = l.trim().replace(/[.!。！:：\s]+$/, '');
+    return /^(done|finished|完成|已完成)$/i.test(t);
+  });
 }
 
 /** 生成给模型的紧凑语言手册（用于系统提示） */

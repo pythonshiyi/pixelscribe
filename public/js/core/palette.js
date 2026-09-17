@@ -119,6 +119,21 @@ export class Palette {
     return new Palette(colors, makeNames(preset.names, colors), preset.label);
   }
 
+  /**
+   * 紧凑色板速查串（供提示词）：`c0=#000000(black) c1=#1d2b53 ...`
+   * @param {number} [max] 最多列出多少色（超出省略）
+   */
+  legend(max = 32) {
+    const nameOf = {};
+    for (const [n, i] of Object.entries(this.names || {})) if (nameOf[i] === undefined) nameOf[i] = n;
+    const hexOf = (c) => `#${[c.r, c.g, c.b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    const parts = this.colors.slice(0, max).map((c, i) => (
+      nameOf[i] ? `c${i}=${hexOf(c)}(${nameOf[i]})` : `c${i}=${hexOf(c)}`
+    ));
+    if (this.colors.length > max) parts.push('…');
+    return parts.join(' ');
+  }
+
   clone() {
     return new Palette(this.colors.map((c) => ({ ...c })), { ...this.names }, this.label);
   }

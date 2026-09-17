@@ -8,6 +8,11 @@
  *   GET  /api/config     前端能力探测（不含任何密钥）
  *   POST /api/chat       反向代理到 OpenAI 兼容端点，SSE 透传
  *
+ * 网关适配（与鲸语 WhaleTalk 同款）：
+ *   · 端点归一化：粘贴完整 `/chat/completions` 端点也能用；
+ *   · OpenCode Go / Zen：自动注入 `x-opencode-session` 会话头 + 自定义 UA；
+ *   · DeepSeek V4.1 Flash 等原生多模态模型：thinking 开关可控（默认关）。
+ *
  * 安全：API Key 只存在于服务端环境变量，永不下发浏览器。
  */
 
@@ -15,27 +20,124 @@ import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const VERSION = '1.1.0';
 
-try {
-  process.loadEnvFile(path.join(__dirname, '.env'));
-} catch {
-  /* 无 .env 时使用默认值 / 环境变量 */
+/* ───────────────────────── .env 加载 ───────────────────────── */
+
+/**
+ * 加载 .env。Node ≥20.12 有内置 `process.loadEnvFile`；更早的 20.x 没有，
+ * 这里给一个最小解析器兜底，避免「明明写了 .env 却进演示模式」的静默失败。
+ */
+function loadDotEnv(file) {
+  try {
+    if (typeof process.loadEnvFile === 'function') {
+      process.loadEnvFile(file);
+      return;
+    }
+    const text = fs.readFileSync(file, 'utf8');
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+      if (!m) continue;
+      let v = m[2].trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      if (!(m[1] in process.env)) process.env[m[1]] = v;
+    }
+  } catch {
+    /* 无 .env 时使用默认值 / 环境变量 */
+  }
 }
+
+loadDotEnv(path.join(__dirname, '.env'));
+
+/* ───────────────────────── 网关适配 ───────────────────────── */
+
+/** 去掉末尾 `/chat/completions` 与多余斜杠；保留版本段（如 /v1）。 */
+function normalizeBaseUrl(baseUrl) {
+  const b = String(baseUrl || '').trim();
+  if (!b) return b;
+  return b.replace(/\/chat\/completions\/?$/i, '').replace(/\/+$/, '');
+}
+
+/** 是否 OpenCode Go / Zen 网关（需 x-opencode-session 会话头）。 */
+function isOpencodeEndpoint(baseUrl) {
+  return normalizeBaseUrl(baseUrl).toLowerCase().includes('opencode.ai');
+}
+
+/** 是否 DeepSeek 官方端点（官方专属 thinking 参数仅此处默认下发）。 */
+function isOfficialEndpoint(baseUrl) {
+  let b = normalizeBaseUrl(baseUrl).toLowerCase();
+  if (b.endsWith('/beta')) b = b.slice(0, -5);
+  return b === 'https://api.deepseek.com' || b === 'http://api.deepseek.com'
+    || b === 'https://api.deepseek.com/v1' || b === 'http://api.deepseek.com/v1';
+}
+
+/**
+ * 复用鲸语 WhaleTalk 的网关配置（可选）。
+ * WhaleTalk 的 `config.json` 里 `base_url` / `model` 是明文，可复用；
+ * `api_key` 经 Windows DPAPI 加密，Node 端无法解密——只在看起来是明文
+ * `sk-...` 时才采用，否则仍需在 `.env` 里填 `PX_API_KEY`。
+ */
+function readGatewayConfig() {
+  const p = process.env.PX_GATEWAY_CONFIG;
+  if (!p) return {};
+  try {
+    const j = JSON.parse(fs.readFileSync(path.resolve(p), 'utf8'));
+    const key = typeof j.api_key === 'string' && /^sk-[A-Za-z0-9_-]{8,}$/.test(j.api_key)
+      ? j.api_key : '';
+    return { baseUrl: j.base_url || j.baseUrl || '', model: j.model || '', apiKey: key };
+  } catch {
+    return {};
+  }
+}
+
+const GW = readGatewayConfig();
 
 const CFG = {
   port: Number(process.env.PX_PORT || 5173),
-  baseUrl: (process.env.PX_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
-  apiKey: process.env.PX_API_KEY || '',
-  model: process.env.PX_MODEL || 'gpt-4o-mini',
+  baseUrl: normalizeBaseUrl(process.env.PX_BASE_URL || GW.baseUrl || 'https://opencode.ai/zen/go/v1'),
+  apiKey: process.env.PX_API_KEY || GW.apiKey || '',
+  model: process.env.PX_MODEL || GW.model || 'deepseek-v4.1-flash',
   temperature: Number(process.env.PX_TEMPERATURE || 0.6),
   maxIterations: Number(process.env.PX_MAX_ITERATIONS || 6),
   visionLongEdge: Number(process.env.PX_VISION_LONG_EDGE || 384),
-  timeoutMs: Number(process.env.PX_TIMEOUT_MS || 120000),
+  timeoutMs: Number(process.env.PX_TIMEOUT_MS || 180000),
+  maxTokens: Number(process.env.PX_MAX_TOKENS || 2048),
+  // auto：已知网关（opencode / 官方）→ 关闭思考（快、省、确定性好）；其它网关不下发；
+  // disabled / enabled：强制。
+  thinking: String(process.env.PX_THINKING || 'auto').toLowerCase(),
+  vision: String(process.env.PX_VISION || 'auto').toLowerCase(),
 };
+
+// 不透明、按进程稳定：同一会话路由到同一后端，提升缓存命中（官方文档要求）。
+const OPENCODE_SESSION = crypto.randomUUID();
+const USER_AGENT = 'PixelScribe/1.1 (+https://github.com/pythonshiyi/pixelscribe)';
+
+/** 按端点返回需注入的默认请求头（仅 opencode.ai 需要会话头）。 */
+function gatewayHeaders(baseUrl) {
+  const h = { 'User-Agent': USER_AGENT };
+  if (isOpencodeEndpoint(baseUrl)) {
+    h['x-opencode-session'] = OPENCODE_SESSION;
+    h['x-opencode-client'] = 'pixelscribe';
+  }
+  return h;
+}
+
+/** 解析 thinking 策略 → 要下发的 extra body 字段（无则 null）。 */
+function thinkingBody(baseUrl, mode) {
+  const known = isOfficialEndpoint(baseUrl) || isOpencodeEndpoint(baseUrl);
+  if (mode === 'enabled') return { type: 'enabled' };
+  if (mode === 'disabled') return { type: 'disabled' };
+  return known ? { type: 'disabled' } : null;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -100,17 +202,57 @@ async function serveStatic(req, res, urlPath) {
   }
 }
 
-function providerHeaders(extra = {}) {
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${CFG.apiKey}`,
-    ...extra,
+function providerHeaders(baseUrl, hasKey) {
+  const h = { 'Content-Type': 'application/json', ...gatewayHeaders(baseUrl) };
+  if (hasKey) h.Authorization = `Bearer ${CFG.apiKey}`;
+  return h;
+}
+
+function buildUpstreamBody(payload, baseUrl, { withThinking }) {
+  const body = {
+    model: payload.model || CFG.model,
+    messages: payload.messages || [],
+    temperature: payload.temperature ?? CFG.temperature,
+    stream: payload.stream !== false,
   };
+  let maxTokens = payload.max_tokens ?? CFG.maxTokens;
+  let thinking = null;
+  if (withThinking) thinking = thinkingBody(baseUrl, CFG.thinking);
+  if (thinking) body.thinking = thinking;
+  // 开思考时 reasoning 也占 completion 预算，下限抬到 8192，避免 content 被挤空
+  if (thinking?.type === 'enabled' && maxTokens && maxTokens < 8192) maxTokens = 8192;
+  if (maxTokens) body.max_tokens = maxTokens;
+  if (payload.top_p != null) body.top_p = payload.top_p;
+  if (payload.response_format) body.response_format = payload.response_format;
+  return body;
+}
+
+/** 调用上游一次，返回 fetch Response（非流式/流式都走这里）。 */
+async function callUpstream(baseUrl, apiKey, body, signal) {
+  const headers = { 'Content-Type': 'application/json', ...gatewayHeaders(baseUrl) };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  return fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+/**
+ * 判断错误是否与 thinking 参数相关（未知网关可能 400 拒绝该字段）。
+ * 命中则去掉 thinking 重试一次。
+ */
+function isThinkingRejection(status, text) {
+  if (status !== 400 && status !== 422) return false;
+  const t = String(text || '').toLowerCase();
+  return t.includes('thinking') || t.includes('reasoning') || t.includes('unknown field')
+    || t.includes('unrecognized') || t.includes('extra');
 }
 
 /**
  * /api/chat
- * 请求体：{ messages, model?, temperature?, stream?, baseUrl?, apiKey? }
+ * 请求体：{ messages, model?, temperature?, stream?, baseUrl?, apiKey?, max_tokens? }
  * 若请求自带 apiKey（前端直连模式），优先使用之。
  */
 async function handleChat(req, res) {
@@ -124,10 +266,7 @@ async function handleChat(req, res) {
   }
 
   const key = payload.apiKey || CFG.apiKey;
-  const baseUrl = (payload.baseUrl || CFG.baseUrl).replace(/\/+$/, '');
-  const model = payload.model || CFG.model;
-  const stream = payload.stream !== false;
-
+  const baseUrl = normalizeBaseUrl(payload.baseUrl || CFG.baseUrl);
   if (!key) {
     return sendJSON(res, 400, {
       error: 'NO_API_KEY',
@@ -135,27 +274,23 @@ async function handleChat(req, res) {
     });
   }
 
-  const body = {
-    model,
-    messages: payload.messages || [],
-    temperature: payload.temperature ?? CFG.temperature,
-    stream,
-  };
-  if (payload.max_tokens) body.max_tokens = payload.max_tokens;
-  if (payload.response_format) body.response_format = payload.response_format;
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CFG.timeoutMs);
   req.on('close', () => controller.abort());
 
   let upstream;
   try {
-    upstream = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: providerHeaders(),
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    upstream = await callUpstream(baseUrl, key, buildUpstreamBody(payload, baseUrl, { withThinking: true }), controller.signal);
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '');
+      if (isThinkingRejection(upstream.status, text)) {
+        // 网关不认 thinking：去掉重试一次（深度兼容未知 OpenAI 兼容端点）
+        upstream = await callUpstream(baseUrl, key, buildUpstreamBody(payload, baseUrl, { withThinking: false }), controller.signal);
+      } else {
+        clearTimeout(timer);
+        return sendJSON(res, upstream.status, { error: 'UPSTREAM_ERROR', status: upstream.status, message: text.slice(0, 4000) });
+      }
+    }
   } catch (err) {
     clearTimeout(timer);
     return sendJSON(res, 502, {
@@ -167,13 +302,10 @@ async function handleChat(req, res) {
   if (!upstream.ok) {
     clearTimeout(timer);
     const text = await upstream.text().catch(() => '');
-    return sendJSON(res, upstream.status, {
-      error: 'UPSTREAM_ERROR',
-      status: upstream.status,
-      message: text.slice(0, 4000),
-    });
+    return sendJSON(res, upstream.status, { error: 'UPSTREAM_ERROR', status: upstream.status, message: text.slice(0, 4000) });
   }
 
+  const stream = payload.stream !== false;
   if (!stream) {
     const text = await upstream.text();
     clearTimeout(timer);
@@ -214,8 +346,13 @@ const server = http.createServer(async (req, res) => {
       temperature: CFG.temperature,
       maxIterations: CFG.maxIterations,
       visionLongEdge: CFG.visionLongEdge,
+      maxTokens: CFG.maxTokens,
+      thinking: CFG.thinking,
+      vision: CFG.vision,
+      provider: isOpencodeEndpoint(CFG.baseUrl) ? 'opencode' : (isOfficialEndpoint(CFG.baseUrl) ? 'deepseek' : 'openai-compatible'),
+      gateway: { opencode: isOpencodeEndpoint(CFG.baseUrl), official: isOfficialEndpoint(CFG.baseUrl) },
       demoMode: !CFG.apiKey,
-      version: '1.0.0',
+      version: VERSION,
     });
   }
 
@@ -248,6 +385,7 @@ server.listen(CFG.port, () => {
     `  ${C}>${R} 运行模式:  ${mode}`,
     `  ${C}>${R} 模型:      ${CFG.model}`,
     `  ${C}>${R} 端点:      ${CFG.baseUrl}`,
+    `  ${C}>${R} 思考模式:  ${CFG.thinking}`,
     '',
     `  按 ${B}Ctrl+C${R} 停止服务`,
     '',

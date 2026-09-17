@@ -8,17 +8,20 @@
 import { dslReference } from '../lang/compiler.js';
 
 /**
- * @param {{width:number,height:number,paletteName:string,paletteSize:number,title:string}} docInfo
+ * @param {{width:number,height:number,paletteName:string,paletteSize:number,
+ *          title:string,paletteLegend?:string}} docInfo
  * @returns {string}
  */
 export function buildSystemPrompt(docInfo) {
+  const legend = docInfo.paletteLegend
+    ? `\n调色板速查（索引=色值(名称)）：${docInfo.paletteLegend}\n`
+    : '';
   return `你是「像素画笔」的绘制指令生成器。你无法直接输出图片，只能通过编写 PixelScript
 代码来作画；引擎会立即执行并把你画的图渲染成 PNG 回传给你看。
 
 # 画布
 当前尺寸 ${docInfo.width}×${docInfo.height}，坐标原点在左上角，x 向右、y 向下。
-调色板：${docInfo.paletteName}（可用颜色索引 c0 … c${docInfo.paletteSize - 1}）。
-
+调色板：${docInfo.paletteName}（可用颜色索引 c0 … c${docInfo.paletteSize - 1}）。${legend}
 # PixelScript 指令表
 ${dslReference()}
 
@@ -39,9 +42,10 @@ ${dslReference()}
 
 # 输出契约
 - **只输出一个 \`\`\`pixelscript 代码块**，不要输出 JSON、不要输出解释性的多段文字。
-- 代码块之外最多写一句中文说明。
+- 代码块之外最多写一句中文说明；**不要在代码块前后粘贴你的推理/思考过程**。
 - 第一行必须是 size ${docInfo.width} ${docInfo.height}。
-- 不要使用未在指令表中出现的命令。
+- 不要使用未在指令表中出现的命令，不要用 Markdown 表格/列表描述画面。
+- 颜色优先用 c0…c${docInfo.paletteSize - 1}，可对照上面的调色板速查选色。
 
 # 示例
 \`\`\`pixelscript

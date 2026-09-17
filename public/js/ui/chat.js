@@ -61,6 +61,8 @@ export class ChatPanel {
       apiKey: direct ? this.app.settings.apiKey : '',
       model: this.app.settings.model || cfg.model,
       temperature: this.app.settings.temperature ?? cfg.temperature,
+      thinking: this.app.settings.thinking ?? cfg.thinking ?? 'auto',
+      maxTokens: this.app.settings.maxTokens ?? cfg.maxTokens ?? 2048,
       proxy: !direct,
       timeoutMs: 180000,
     });
@@ -94,16 +96,24 @@ export class ChatPanel {
       maxIterations: Number($('#aiMaxIter').value) || 6,
       visionLongEdge: this.app.config.visionLongEdge || 384,
       incremental: $('#aiIncremental').checked,
+      vision: this.app.settings.vision ?? this.app.config.vision ?? 'auto',
+      maxTokens: this.app.settings.maxTokens ?? this.app.config.maxTokens ?? 2048,
       onEvent: (e) => this.onEvent(e, isDemo),
     });
 
     this.thinkingEl = el('div', { class: 'thinking collapsed' });
+    this.reasonBody = el('div', { class: 'reason-body' });
+    this.reasonEl = el('div', { class: 'reason hidden' }, [
+      el('div', { class: 'reason-head', text: '💭 模型思考中…' }),
+      this.reasonBody,
+    ]);
+    this._reasonStarted = false;
     const card = el('div', { class: 'round' }, [
       el('div', { class: 'round-head' }, [
         el('span', { class: 'round-no', text: '···' }),
         el('span', { text: '模型生成中' }),
       ]),
-      el('div', { class: 'round-body' }, [this.thinkingEl]),
+      el('div', { class: 'round-body' }, [this.reasonEl, this.thinkingEl]),
     ]);
     this.log.prepend(card);
     this._liveCard = card;
@@ -124,6 +134,18 @@ export class ChatPanel {
           this.thinkingEl.textContent += e.text;
           this.thinkingEl.scrollTop = this.thinkingEl.scrollHeight;
         }
+        break;
+
+      case 'reasoning':
+        if (this.reasonEl && this.reasonBody) {
+          if (!this._reasonStarted) { this._reasonStarted = true; this.reasonEl.classList.remove('hidden'); }
+          this.reasonBody.textContent += e.text;
+          this.reasonBody.scrollTop = this.reasonBody.scrollHeight;
+        }
+        break;
+
+      case 'usage':
+        this._lastUsage = e.usage;
         break;
 
       case 'phase':
@@ -149,12 +171,17 @@ export class ChatPanel {
 
       case 'done':
         this.setStatus(
-          `${e.aborted ? '已中止' : '完成'} · ${e.rounds} 轮${isDemo ? ' · 演示模式' : ''}`,
+          `${e.aborted ? '已中止' : '完成'} · ${e.rounds} 轮`
+          + (e.visionEnabled === false && !isDemo ? ' · 纯文本审查' : '')
+          + (isDemo ? ' · 演示模式' : ''),
           e.aborted ? '' : 'ok',
         );
         this._liveCard?.remove();
         this._liveCard = null;
         this.thinkingEl = null;
+        this.reasonEl = null;
+        this.reasonBody = null;
+        this._reasonStarted = false;
         break;
       default:
         break;

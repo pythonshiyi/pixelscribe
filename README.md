@@ -53,7 +53,10 @@ npm start
 | 终端中文/边框乱码 | Windows 旧控制台请先执行 `chcp 65001` 切到 UTF-8 |
 | 提示"演示模式" | 未读到 `PX_API_KEY`。确认 `.env` 与 `server.mjs` 同目录 |
 | 页面空白 | 必须通过 `http://localhost:5173` 访问；直接双击 `index.html`（`file://`）会被浏览器拦截 ES Module |
-| 模型报 401 / 404 | 检查 `PX_BASE_URL` 是否含 `/v1`，以及 `PX_MODEL` 是否为**支持视觉输入**的模型 |
+| 模型报 401 / 404 | 检查 `PX_API_KEY` 是否有效；`PX_BASE_URL` 填 `.../v1` 或完整 `.../v1/chat/completions` 都可以（自动归一化）；确认 `PX_MODEL` 是**支持视觉输入**的模型 |
+| 报 400 `MissingSessionID` | 用了 OpenCode Go/Zen 但没有会话头——本程序已自动注入 `x-opencode-session`，若仍报错请确认端点域名含 `opencode.ai` |
+| 模型不认 `thinking`（400） | 已自动去掉该字段重试；也可设 `PX_THINKING=auto` 或 `disabled` |
+| AI 面板提示「纯文本审查」 | 当前模型/网关不接受图片输入，已自动降级继续作画（可用 `PX_VISION=off` 永久关闭回灌） |
 
 ---
 
@@ -132,7 +135,7 @@ outline c1
 │     ├─ ai/                provider（流式+视觉） prompts demo agent（闭环）
 │     └─ ui/                dom app tools panels chat
 └─ test/
-   ├─ selftest.mjs          单元 / 集成自测（143 项，含真实 HTTP 闭环）
+   ├─ selftest.mjs          单元 / 集成自测（153 项，含真实 HTTP 闭环）
    └─ dom-smoke.mjs         jsdom 无头 UI 冒烟测试（53 项）
 ```
 
@@ -165,24 +168,45 @@ outline c1
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PX_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容端点 |
+| `PX_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenAI 兼容端点；**粘贴完整 `/chat/completions` 端点也能用**（会自动归一化） |
 | `PX_API_KEY` | *(空)* | 留空则进入演示模式 |
-| `PX_MODEL` | `gpt-4o-mini` | **必须是支持视觉输入的模型** |
+| `PX_MODEL` | `deepseek-v4.1-flash` | **必须是支持视觉输入的模型** |
 | `PX_PORT` | `5173` | 服务端口 |
 | `PX_TEMPERATURE` | `0.6` | 采样温度 |
 | `PX_MAX_ITERATIONS` | `6` | 闭环最大轮次 |
 | `PX_VISION_LONG_EDGE` | `384` | 回灌图长边像素 |
-| `PX_TIMEOUT_MS` | `120000` | 上游超时 |
+| `PX_TIMEOUT_MS` | `180000` | 上游超时 |
+| `PX_MAX_TOKENS` | `2048` | 单轮最大输出 token（PixelScript 很短） |
+| `PX_THINKING` | `auto` | 思考模式：`auto`（已知网关自动关）/ `disabled` / `enabled` |
+| `PX_VISION` | `auto` | 视觉回灌：`auto`（不可用自动降级）/ `on` / `off` |
+| `PX_GATEWAY_CONFIG` | *(空)* | 可选：复用鲸语 WhaleTalk 的 `config.json` 路径（取 `base_url`/`model`；其 `api_key` 经 DPAPI 加密，Node 无法解密，仍需 `PX_API_KEY`） |
 
-推荐的视觉模型：`gpt-4o` / `gpt-4o-mini` / `qwen-vl-max` / `glm-4v` /
-`gemini-2.0-flash` / `moonshot-v1-8k-vision-preview` / `llava`（本地）。
+推荐的视觉模型：`deepseek-v4.1-flash`（原生多模态，推荐）/ `gpt-4o` /
+`gpt-4o-mini` / `qwen-vl-max` / `glm-4v` / `gemini-2.0-flash` / `llava`（本地）。
+
+## 网关与模型适配
+
+服务端与前端都已内置与鲸语 WhaleTalk 同款的网关适配：
+
+- **端点归一化**：`https://opencode.ai/zen/go/v1/chat/completions` 与
+  `.../v1` 都能填，自动去掉重复的 `/chat/completions`（否则会拼成
+  `.../chat/completions/chat/completions` → 404）。
+- **OpenCode Go / Zen**：自动注入 `x-opencode-session` 会话头（不透明、按进程稳定，
+  用于缓存路由）与自定义 `User-Agent`；缺失该头会返回 400 `MissingSessionID`。
+- **DeepSeek V4.1 Flash**：原生多模态，同一模型既写脚本又看图回灌，无需切换视觉模型；
+  默认关闭 thinking（更快、更省、输出更确定），可用 `PX_THINKING=enabled` 打开。
+- **深度兼容未知 OpenAI 兼容端点**：若网关不认 `thinking` 字段而返回 400，
+  会自动去掉该字段重试一次；若网关/模型不接受图片输入，闭环会**自动降级为纯文本审查**
+  并继续作画，不会中断。
+- **思考流**：开启 thinking 时，`reasoning_content` 会单独显示在 AI 面板的「模型思考中」区，
+  不会混入脚本抽取。
 
 ---
 
 ## 测试
 
 ```bash
-npm test           # 单元 + 集成 + 无头 UI 冒烟（共 196 项）
+npm test           # 单元 + 集成 + 无头 UI 冒烟（共 206 项）
 npm run test:unit  # 仅单元 / 集成（无需浏览器，含真实 HTTP 闭环）
 npm run test:dom   # 仅 jsdom 无头 UI 冒烟
 ```

@@ -512,8 +512,25 @@ export class App {
         el('div', { class: 'field' }, [el('label', { text: '温度' }), el('input', { type: 'number', id: 'setTemp', value: String(st.temperature), step: '0.1', min: '0', max: '2' })]),
         el('div', { class: 'field' }, [el('label', { text: '回灌长边 (px)' }), el('input', { type: 'number', id: 'setVision', value: String(st.visionLongEdge), min: '64', max: '1024' })]),
       ]),
+      el('div', { class: 'grid2' }, [
+        el('div', { class: 'field' }, [el('label', { text: '思考模式' }), el('select', { id: 'setThinking' }, [
+          el('option', { value: 'auto', text: 'auto（已知网关自动关，推荐）' }),
+          el('option', { value: 'disabled', text: 'disabled（强制关闭）' }),
+          el('option', { value: 'enabled', text: 'enabled（强制开启）' }),
+        ])]),
+        el('div', { class: 'field' }, [el('label', { text: '视觉回灌' }), el('select', { id: 'setVisionMode' }, [
+          el('option', { value: 'auto', text: 'auto（不可用自动降级）' }),
+          el('option', { value: 'on', text: 'on（强制启用）' }),
+          el('option', { value: 'off', text: 'off（纯文本审查）' }),
+        ])]),
+      ]),
+      el('div', { class: 'field' }, [el('label', { text: '单轮最大输出 token' }), el('input', { type: 'number', id: 'setMaxTokens', value: String(st.maxTokens), min: '256', max: '32768', step: '256' })]),
       el('p', { text: '提示：生产环境建议保持直连模式关闭，把 Key 放在服务端 .env 中。' }),
     ]);
+    setTimeout(() => {
+      const ts = $('#setThinking'); if (ts) ts.value = String(st.thinking || 'auto');
+      const vs = $('#setVisionMode'); if (vs) vs.value = String(st.vision || 'auto');
+    }, 0);
 
     modal({
       title: '设置',
@@ -531,6 +548,9 @@ export class App {
               apiKey: $('#setKey').value.trim(),
               temperature: Number($('#setTemp').value) || 0.6,
               visionLongEdge: Number($('#setVision').value) || 384,
+              thinking: $('#setThinking')?.value || 'auto',
+              vision: $('#setVisionMode')?.value || 'auto',
+              maxTokens: Number($('#setMaxTokens')?.value) || 2048,
             };
             this.saveSettings();
             this.setAiBadge();
@@ -567,24 +587,30 @@ export class App {
   defaultSettings() {
     return {
       directMode: false,
-      baseUrl: this.config.baseUrl || 'https://api.openai.com/v1',
-      model: this.config.model || 'gpt-4o-mini',
+      baseUrl: this.config.baseUrl || 'https://opencode.ai/zen/go/v1',
+      model: this.config.model || 'deepseek-v4.1-flash',
       apiKey: '',
       temperature: this.config.temperature ?? 0.6,
       visionLongEdge: this.config.visionLongEdge ?? 384,
       maxIterations: this.config.maxIterations ?? 6,
+      thinking: this.config.thinking ?? 'auto',
+      vision: this.config.vision ?? 'auto',
+      maxTokens: this.config.maxTokens ?? 2048,
     };
   }
 
   loadSettings() {
     const base = {
       directMode: false,
-      baseUrl: this.config?.baseUrl || 'https://api.openai.com/v1',
-      model: this.config?.model || 'gpt-4o-mini',
+      baseUrl: this.config?.baseUrl || 'https://opencode.ai/zen/go/v1',
+      model: this.config?.model || 'deepseek-v4.1-flash',
       apiKey: '',
       temperature: this.config?.temperature ?? 0.6,
       visionLongEdge: this.config?.visionLongEdge ?? 384,
       maxIterations: this.config?.maxIterations ?? 6,
+      thinking: this.config?.thinking ?? 'auto',
+      vision: this.config?.vision ?? 'auto',
+      maxTokens: this.config?.maxTokens ?? 2048,
     };
     try {
       const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');

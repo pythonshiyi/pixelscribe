@@ -3,7 +3,7 @@
 > 让**不具备原生生图能力**的多模态大模型，通过「结构化绘制 + 视觉回灌 + 自我修正」闭环，
 > 产出专业级像素美术作品。
 
-- 版本：`1.0.0`
+- 版本：`1.1.0`
 - 文档状态：定稿
 - 关键词：PixelScript DSL · 视觉闭环 · 像素级可控 · 零构建 Web 应用
 
@@ -126,7 +126,7 @@ Pass 4 (回灌审查)   → 局部 patch
 │  ┌────────────┐   ┌────────────┐   ┌──────────────────────┐  │
 │  │  UI 层      │   │  引擎层     │   │  语言层               │  │
 │  │ toolbar    │──▶│ document   │◀──│  compiler.js         │  │
-│  │ panels     │   │ history    │   │  commands.js (24 op) │  │
+│  │ panels     │   │ history    │   │  compiler.js (28 op) │  │
 │  │ chat       │   │ renderer   │   │  font5x7             │  │
 │  │ tools      │   │ buffer     │   └──────────────────────┘  │
 │  └────────────┘   │ palette    │              ▲               │
@@ -172,7 +172,7 @@ Pass 4 (回灌审查)   → 局部 patch
 4. **确定性**：随机相关指令（`noise`）必须显式 `seed`。
 5. **颜色三态**：调色板索引 `c3` / 十六进制 `#ff004d` / 语义名 `red`。
 
-### 4.2 指令总表（24 条）
+### 4.2 指令总表（28 条）
 
 #### 指令型（Directive）
 
@@ -476,6 +476,11 @@ async function run(agent) {
 | `/api/config` | GET | `{ keyConfigured, baseUrl, model, demoMode }`，**不含 Key** |
 | `/api/chat` | POST | 反向代理到 LLM，支持 SSE 透传与中断 |
 
+**网关适配（v1.1.0，与鲸语 WhaleTalk 同款）**：端点自动归一化（粘贴完整
+`/chat/completions` 亦可）；OpenCode Go / Zen 自动注入 `x-opencode-session` 会话头与
+自定义 UA；`thinking` 可按端点策略下发（默认对已知网关关闭），网关拒绝该字段时自动
+去掉重试；`PX_GATEWAY_CONFIG` 可指向 WhaleTalk 的 `config.json` 复用其 `base_url`/`model`。
+
 ### 9.2 安全要点
 
 - API Key **仅存于服务端环境变量**，永不下发浏览器。
@@ -543,7 +548,7 @@ async function run(agent) {
 
 `npm run selftest` 覆盖：
 
-1. **语言层**：24 条指令逐条执行不报错；非法输入产出预期错误行号。
+1. **语言层**：28 条指令逐条执行不报错；非法输入产出预期错误行号。
 2. **引擎层**：对称、洪水填充、描边、翻转、旋转的像素级断言。
 3. **导出**：PNG 魔数、尺寸、最近邻放大正确性。
 4. **端到端**：内置范例脚本渲染 → 校验非空像素占比 → 落到 `out/test/`。
@@ -600,7 +605,7 @@ async function run(agent) {
 │        ├─ panels.js         图层 / 色板 / 脚本面板
 │        └─ chat.js           AI 面板与轮次时间线
 └─ test/
-   ├─ selftest.mjs            单元 / 集成自测（143 项）
+   ├─ selftest.mjs            单元 / 集成自测（153 项）
    └─ dom-smoke.mjs           jsdom 无头 UI 冒烟测试（53 项）
 ```
 

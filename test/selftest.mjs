@@ -25,6 +25,9 @@ import { runScript, checkSyntax, extractScript, isDone, tokenize, COMMANDS, dslR
 import { glyph, textWidth } from '../public/js/lang/font5x7.js';
 import { encodePNG, encodePNGScaled, toBase64, toDataURL } from '../public/js/io/png.js';
 import { demoScript, demoCritique, demoReply, DemoProvider } from '../public/js/ai/demo.js';
+import {
+  Provider, normalizeBaseUrl, isOpencodeEndpoint, isOfficialEndpoint, isThinkingRejection,
+} from '../public/js/ai/provider.js';
 import { buildSystemPrompt, buildCritique, buildRepair } from '../public/js/ai/prompts.js';
 import { SAMPLES } from '../public/js/samples.js';
 
@@ -850,6 +853,82 @@ describe('模型回复解析', () => {
   it('不会把 DONE 误判为脚本', () => {
     eq(isDone('DONE'), true);
     eq(extractScript('DONE'), null);
+  });
+
+  it('围栏语言标签与首行同行', () => {
+    eq(extractScript('```pixelscript size 4 4\npx 0 0 c8\n```'), 'size 4 4\npx 0 0 c8');
+  });
+
+  it('流式截断（无闭合围栏）也能抽取', () => {
+    eq(extractScript('```pixelscript\nsize 4 4\npx 1 1 c8'), 'size 4 4\npx 1 1 c8');
+  });
+
+  it('无围栏时不把散文当脚本', () => {
+    eq(extractScript('我会先用椭圆画一个史莱姆\n再用圆形画两只眼睛'), null);
+  });
+
+  it('有可执行脚本时 isDone 为 false（防「脚本 + DONE」被吞）', () => {
+    eq(isDone('```pixelscript\nsize 4 4\npx 0 0 c8\n```\nDONE'), false);
+  });
+});
+
+/* ═══════════════ 8.5 网关适配 ═══════════════ */
+
+describe('网关适配', () => {
+  it('端点归一化（完整 /chat/completions 与基址等价）', () => {
+    eq(normalizeBaseUrl('https://opencode.ai/zen/go/v1/chat/completions'), 'https://opencode.ai/zen/go/v1');
+    eq(normalizeBaseUrl('https://opencode.ai/zen/go/v1/'), 'https://opencode.ai/zen/go/v1');
+    eq(normalizeBaseUrl('https://api.deepseek.com/v1/chat/completions/'), 'https://api.deepseek.com/v1');
+    eq(normalizeBaseUrl(''), '');
+  });
+
+  it('识别 opencode / DeepSeek 官方端点', () => {
+    eq(isOpencodeEndpoint('https://opencode.ai/zen/go/v1'), true);
+    eq(isOpencodeEndpoint('https://api.deepseek.com/v1'), false);
+    eq(isOfficialEndpoint('https://api.deepseek.com/v1/chat/completions'), true);
+    eq(isOfficialEndpoint('https://api.openai.com/v1'), false);
+  });
+
+  it('thinking 拒绝识别（仅 400/422 且提及相关词）', () => {
+    eq(isThinkingRejection(400, '{"error":"unknown field thinking"}'), true);
+    eq(isThinkingRejection(400, 'reasoning_effort not supported'), true);
+    eq(isThinkingRejection(500, 'thinking error'), false);
+    eq(isThinkingRejection(400, 'invalid api key'), false);
+  });
+
+  it('Provider 对 opencode 注入会话头，其它端点不注入', () => {
+    const p = new Provider({ baseUrl: 'https://opencode.ai/zen/go/v1', model: 'm', thinking: 'auto' });
+    const h = p.gatewayHeaders();
+    assert(h['x-opencode-session'], '应注入 x-opencode-session');
+    eq(h['x-opencode-client'], 'pixelscribe');
+    deepEq(p.thinkingBody(), { type: 'disabled' });
+
+    const p2 = new Provider({ baseUrl: 'https://api.openai.com/v1', model: 'm', thinking: 'auto' });
+    eq('x-opencode-session' in p2.gatewayHeaders(), false);
+    eq(p2.thinkingBody(), null);
+
+    const p3 = new Provider({ baseUrl: 'https://api.openai.com/v1', thinking: 'enabled' });
+    deepEq(p3.thinkingBody(), { type: 'enabled' });
+  });
+
+  it('直连模式请求体带 max_tokens 与 thinking', () => {
+    const p = new Provider({ baseUrl: 'https://opencode.ai/zen/go/v1', apiKey: 'k', model: 'm', proxy: false, maxTokens: 1024 });
+    const body = p.buildPayload([{ role: 'user', content: 'hi' }], {}, true);
+    eq(body.max_tokens, 1024);
+    deepEq(body.thinking, { type: 'disabled' });
+    const p2 = new Provider({ baseUrl: 'https://api.openai.com/v1', model: 'm', proxy: false, maxTokens: 512 });
+    const body2 = p2.buildPayload([{ role: 'user', content: 'hi' }], {}, true);
+    eq(body2.thinking, undefined);
+    eq(body2.max_tokens, 512);
+  });
+
+  it('色板速查 legend 含索引/色值/名称，超限省略', () => {
+    const pal = Palette.from('pico8');
+    const s = pal.legend(4);
+    assert(s.includes('c0=#000000(black)'), s);
+    assert(s.includes('c1=#1d2b53(darkblue)'), s);
+    assert(s.endsWith('…'), '超出上限应省略');
+    assert(!pal.legend(16).includes('…'));
   });
 });
 
