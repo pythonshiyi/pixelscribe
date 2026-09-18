@@ -63,7 +63,7 @@ export function sanitizeMessages(messages) {
   });
 }
 
-const USER_AGENT = 'PixelScribe/1.7 (+https://github.com/pythonshiyi/pixelscribe)';
+const USER_AGENT = 'PixelScribe/2.5 (+https://github.com/pythonshiyi/pixelscribe)';
 
 function randomId() {
   try {
@@ -78,6 +78,24 @@ export function isThinkingRejection(status, text) {
   const t = String(text || '').toLowerCase();
   return t.includes('thinking') || t.includes('reasoning') || t.includes('unknown field')
     || t.includes('unrecognized') || t.includes('extra');
+}
+
+/** 构造 AbortError（跨环境一致，避免依赖 DOMException）。 */
+function abortError(message = 'Aborted') {
+  const e = new Error(message);
+  e.name = 'AbortError';
+  return e;
+}
+
+/** 可被 AbortSignal 打断的 sleep。 */
+function sleepAbort(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError());
+    const cleanup = () => { clearTimeout(t); signal?.removeEventListener?.('abort', onAbort); };
+    const onAbort = () => { cleanup(); reject(abortError()); };
+    const t = setTimeout(() => { cleanup(); resolve(); }, ms);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
 }
 
 export class Provider {
@@ -155,6 +173,8 @@ export class Provider {
     }
     if (mt) body.max_tokens = mt;
     if (opts.responseFormat) body.response_format = opts.responseFormat;
+    // 直连模式：要求上游在流式响应末尾带回 usage，供成本面板统计。
+    if (body.stream) body.stream_options = { include_usage: true };
     return body;
   }
 
@@ -172,114 +192,163 @@ export class Provider {
       : { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}`, ...this.gatewayHeaders() };
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs);
+    const onOuterAbort = () => controller.abort();
     if (opts.signal) {
       if (opts.signal.aborted) controller.abort();
-      else opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      else opts.signal.addEventListener('abort', onOuterAbort, { once: true });
     }
+    // 超时与用户取消必须区分：前者是致命错误，后者是正常中止。
+    const asAbort = () => (timedOut
+      ? new ProviderError(`请求超时（${Math.round(this.timeoutMs / 1000)}s）`, 0, 'TIMEOUT')
+      : new ProviderError('请求已取消', 0, 'ABORTED'));
 
-    let res;
     try {
-      res = await this._post(url, this.buildPayload(messages, opts, true), headers, controller.signal);
-      if (!res.ok && !this.proxy) {
-        // 直连模式下，网关若不认 thinking，去掉重试一次（深度兼容未知端点）
-        const text = await res.clone().text().catch(() => '');
-        if (isThinkingRejection(res.status, text)) {
-          res = await this._post(url, this.buildPayload(messages, opts, false), headers, controller.signal);
-        }
-      }
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') throw new ProviderError('请求已取消', 0, 'ABORTED');
-      throw new ProviderError(`网络请求失败：${err.message}`, 0, 'NETWORK');
-    }
-
-    if (!res.ok) {
-      clearTimeout(timer);
-      const text = await res.text().catch(() => '');
-      let msg = text;
+      let res;
       try {
-        const j = JSON.parse(text);
-        msg = j.message || j.error?.message || j.error || text;
-        if (typeof msg !== 'string') msg = JSON.stringify(msg);
-      } catch { /* 非 JSON 错误体 */ }
-      throw new ProviderError(`模型接口返回 ${res.status}：${String(msg).slice(0, 600)}`, res.status, 'UPSTREAM');
-    }
-
-    if (!stream) {
-      const json = await res.json();
-      clearTimeout(timer);
-      const m = json.choices?.[0]?.message ?? {};
-      const text = typeof m.content === 'string' ? m.content : '';
-      const reasoning = typeof m.reasoning_content === 'string' ? m.reasoning_content : '';
-      if (opts.onReasoning && reasoning) opts.onReasoning(reasoning);
-      if (opts.onDelta && text) opts.onDelta(text);
-      return { text, reasoning, usage: json.usage, raw: json };
-    }
-
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('text/event-stream')) {
-      const json = await res.json();
-      clearTimeout(timer);
-      const m = json.choices?.[0]?.message ?? {};
-      const text = typeof m.content === 'string' ? m.content : '';
-      const reasoning = typeof m.reasoning_content === 'string' ? m.reasoning_content : '';
-      if (opts.onReasoning && reasoning) opts.onReasoning(reasoning);
-      if (opts.onDelta && text) opts.onDelta(text);
-      return { text, reasoning, usage: json.usage, raw: json };
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let text = '';
-    let reasoning = '';
-    let usage = null;
-
-    const handleData = (data) => {
-      if (data === '[DONE]') return;
-      let json;
-      try { json = JSON.parse(data); } catch { return; }
-      if (json.usage) usage = json.usage;
-      const delta = json.choices?.[0]?.delta ?? json.choices?.[0]?.message;
-      if (!delta) return;
-      const rc = delta.reasoning_content;
-      if (typeof rc === 'string' && rc) {
-        reasoning += rc;
-        if (opts.onReasoning) opts.onReasoning(rc);
-      }
-      const piece = typeof delta.content === 'string'
-        ? delta.content
-        : Array.isArray(delta.content)
-          ? delta.content.map((p) => p?.text ?? '').join('')
-          : '';
-      if (piece) {
-        text += piece;
-        if (opts.onDelta) opts.onDelta(piece);
-      }
-    };
-
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl;
-        while ((nl = buffer.indexOf('\n')) >= 0) {
-          const raw = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (!raw || raw.startsWith(':') || !raw.startsWith('data:')) continue;
-          handleData(raw.slice(5).trim());
+        res = await this._postRetry(url, this.buildPayload(messages, opts, true), headers, controller.signal);
+        if (!res.ok && !this.proxy) {
+          // 直连模式下，网关若不认 thinking，去掉重试一次（深度兼容未知端点）
+          const text = await res.clone().text().catch(() => '');
+          if (isThinkingRejection(res.status, text)) {
+            res = await this._postRetry(url, this.buildPayload(messages, opts, false), headers, controller.signal);
+          }
         }
+      } catch (err) {
+        if (err.name === 'AbortError') throw asAbort();
+        throw new ProviderError(`网络请求失败：${err.message}`, 0, 'NETWORK');
       }
-      if (buffer.trim().startsWith('data:')) handleData(buffer.trim().slice(5).trim());
-    } catch (err) {
-      if (err.name !== 'AbortError') throw new ProviderError(`读取流失败：${err.message}`, 0, 'STREAM');
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let msg = text;
+        try {
+          const j = JSON.parse(text);
+          msg = j.message || j.error?.message || j.error || text;
+          if (typeof msg !== 'string') msg = JSON.stringify(msg);
+        } catch { /* 非 JSON 错误体 */ }
+        throw new ProviderError(`模型接口返回 ${res.status}：${String(msg).slice(0, 600)}`, res.status, 'UPSTREAM');
+      }
+
+      const asJson = (json) => {
+        const m = json.choices?.[0]?.message ?? {};
+        const text = typeof m.content === 'string' ? m.content : '';
+        const reasoning = typeof m.reasoning_content === 'string' ? m.reasoning_content : '';
+        if (opts.onReasoning && reasoning) opts.onReasoning(reasoning);
+        if (opts.onDelta && text) opts.onDelta(text);
+        return { text, reasoning, usage: json.usage, raw: json };
+      };
+
+      if (!stream) return asJson(await res.json());
+
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('text/event-stream')) return asJson(await res.json());
+      if (!res.body) throw new ProviderError('响应没有可读正文', 0, 'STREAM');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let text = '';
+      let reasoning = '';
+      let usage = null;
+      let dataLines = [];
+
+      const handleData = (data) => {
+        const payload = data.trim();
+        if (!payload || payload === '[DONE]') return;
+        let json;
+        try { json = JSON.parse(payload); } catch { return; }
+        if (json.error) {
+          const em = typeof json.error === 'string' ? json.error : (json.error.message || JSON.stringify(json.error));
+          throw new ProviderError(`模型接口错误：${String(em).slice(0, 600)}`, 0, 'UPSTREAM');
+        }
+        if (json.usage) usage = json.usage;
+        const delta = json.choices?.[0]?.delta ?? json.choices?.[0]?.message;
+        if (!delta) return;
+        const rc = delta.reasoning_content;
+        if (typeof rc === 'string' && rc) {
+          reasoning += rc;
+          if (opts.onReasoning) opts.onReasoning(rc);
+        }
+        const piece = typeof delta.content === 'string'
+          ? delta.content
+          : Array.isArray(delta.content)
+            ? delta.content.map((p) => p?.text ?? '').join('')
+            : '';
+        if (piece) {
+          text += piece;
+          if (opts.onDelta) opts.onDelta(piece);
+        }
+      };
+      // SSE 规范：多条 `data:` 行属于同一事件，用空行分隔并拼成多行数据。
+      const flushEvent = () => {
+        if (!dataLines.length) return;
+        const joined = dataLines.join('\n');
+        dataLines = [];
+        handleData(joined);
+      };
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, nl).replace(/\r$/, '');
+            buffer = buffer.slice(nl + 1);
+            if (line === '') { flushEvent(); continue; }
+            if (line.startsWith(':')) continue;
+            if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+          }
+        }
+        buffer += decoder.decode(); // 冲掉解码器中残留的多字节字符
+        if (buffer) {
+          for (const line of buffer.split('\n')) {
+            const l = line.replace(/\r$/, '');
+            if (l.startsWith('data:')) dataLines.push(l.slice(5).replace(/^ /, ''));
+          }
+        }
+        flushEvent();
+      } catch (err) {
+        if (err instanceof ProviderError) throw err;
+        if (err.name === 'AbortError') throw asAbort();
+        throw new ProviderError(`读取流失败：${err.message}`, 0, 'STREAM');
+      }
+
+      return { text, reasoning, usage };
     } finally {
       clearTimeout(timer);
+      opts.signal?.removeEventListener?.('abort', onOuterAbort);
     }
+  }
 
-    return { text, reasoning, usage };
+  /** 单次 POST，带 429/5xx/网络错误的指数退避重试。 */
+  async _postRetry(url, payload, headers, signal) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) throw abortError();
+      try {
+        const res = await this._post(url, payload, headers, signal);
+        if (res.status === 429 || res.status >= 500) {
+          if (attempt < 2) { await sleepAbort(this._retryDelay(res, attempt), signal); continue; }
+        }
+        return res;
+      } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        lastErr = err;
+        if (attempt < 2) { await sleepAbort(Math.min(8000, 500 * 2 ** attempt), signal); continue; }
+        throw err;
+      }
+    }
+    throw lastErr || new Error('请求重试耗尽');
+  }
+
+  _retryDelay(res, attempt) {
+    const ra = Number(res.headers.get('retry-after'));
+    if (Number.isFinite(ra) && ra > 0) return Math.min(30000, ra * 1000);
+    return Math.min(8000, 500 * 2 ** attempt);
   }
 
   async _post(url, payload, headers, signal) {

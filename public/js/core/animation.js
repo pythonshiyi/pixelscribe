@@ -13,6 +13,7 @@ import { Layer } from './document.js';
 import { encodePNG, toBase64 } from '../io/png.js';
 import { encodeGIF } from '../io/gif.js';
 import { encodeAseprite } from '../io/aseprite.js';
+import { bytesToHex, hexToBytes } from '../util/color.js';
 
 /** 合成一组图层快照为 PixelBuffer（与 PixelDocument.composite 语义一致）。 */
 function composeLayers(layers, width, height) {
@@ -69,9 +70,6 @@ function emptyFrameLike(frame) {
     layers: frame.layers.map((l) => ({ ...l, meta: l.meta ? { ...l.meta } : null, data: new Uint8ClampedArray(l.data.length) })),
   };
 }
-
-const bytesToHex = (arr) => { let s = ''; for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0'); return s; };
-const hexToBytes = (hex) => { const a = new Uint8ClampedArray(hex.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(hex.substr(i * 2, 2), 16); return a; };
 
 export class Animation {
   /** @param {{width?:number,height?:number,fps?:number,loop?:number}} [opts] */
@@ -189,12 +187,17 @@ export class Animation {
     const f = this.frames[index];
     if (!f) return '';
     const buf = this.frameBuffer(index);
-    const scale = Math.max(1, Math.round(longEdge / Math.max(f.width, f.height)));
-    // 用最近邻放大后编码
-    const ow = f.width * scale, oh = f.height * scale;
+    const maxEdge = Math.max(f.width, f.height);
+    const scale = maxEdge > longEdge
+      ? longEdge / maxEdge
+      : Math.max(1, Math.round(longEdge / maxEdge));
+    // 用最近邻缩放后编码
+    const ow = Math.max(1, Math.round(f.width * scale)), oh = Math.max(1, Math.round(f.height * scale));
     const out = new Uint8ClampedArray(ow * oh * 4);
     for (let y = 0; y < oh; y++) for (let x = 0; x < ow; x++) {
-      const si = ((Math.floor(y / scale) * f.width) + Math.floor(x / scale)) * 4;
+      const sy = Math.min(f.height - 1, Math.floor(y / scale));
+      const sx = Math.min(f.width - 1, Math.floor(x / scale));
+      const si = (sy * f.width + sx) * 4;
       const di = (y * ow + x) * 4;
       out[di] = buf.data[si]; out[di + 1] = buf.data[si + 1]; out[di + 2] = buf.data[si + 2]; out[di + 3] = buf.data[si + 3];
     }

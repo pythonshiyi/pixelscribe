@@ -8,6 +8,7 @@ import { DemoProvider } from '../ai/demo.js';
 import { Agent } from '../ai/agent.js';
 import { MultiAgent } from '../ai/multiagent.js';
 import { CostTracker } from '../ai/cost.js';
+import { getAction } from '../ai/actions.js';
 
 export class ChatPanel {
   /** @param {any} app */
@@ -39,7 +40,12 @@ export class ChatPanel {
   }
 
   init() {
-    this.btnGenerate.addEventListener('click', () => this.generate());
+    // 统一兜底：任何未捕获异常都提示而不是变成 unhandled rejection。
+    const run = (opts) => this.generate(opts).catch((e) => {
+      this.setStatus(`生成失败：${e?.message || e}`, 'err');
+      toast(`生成失败：${e?.message || e}`, 'err');
+    });
+    this.btnGenerate.addEventListener('click', () => run());
     this.btnAbort.addEventListener('click', () => this.agent?.abort());
     $('#btnCostReset')?.addEventListener('click', () => {
       this.cost.reset();
@@ -49,11 +55,11 @@ export class ChatPanel {
     $('#btnRegionGen')?.addEventListener('click', () => {
       const region = this.app.renderer.selection;
       if (!region) { toast('请先用选区工具（M）框选区域', 'warn'); return; }
-      this.generate({ region });
+      run({ region });
     });
     this.refreshCost();
     this.brief.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') this.generate();
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run();
     });
     for (const chip of document.querySelectorAll('#aiExamples .chip')) {
       chip.addEventListener('click', () => {
@@ -113,6 +119,7 @@ export class ChatPanel {
     if (Number.isFinite(size) && size !== this.app.doc.width) {
       this.app.history.begin('调整画布');
       this.app.doc.resize(size, size);
+      this.app.clearAnnotations();
       this.app.history.commit();
       this.app.afterEdit(true);
     }
@@ -121,7 +128,16 @@ export class ChatPanel {
     const style = $('#aiStyle')?.value;
     if (style) this.app.doc.style = style;
 
-    const frameCount = Math.max(1, Math.min(24, Number($('#aiFrames')?.value) || 1));
+    // 动作预设会覆盖帧数并设定 fps
+    const actionId = $('#aiAction')?.value || 'none';
+    const action = getAction(actionId);
+    let frameCount = Math.max(1, Math.min(24, Number($('#aiFrames')?.value) || 1));
+    if (action.id !== 'none') {
+      frameCount = Math.max(1, Math.min(24, action.frames));
+      const fi = $('#aiFrames'); if (fi) fi.value = String(frameCount);
+      if (this.app.animation) this.app.animation.fps = action.fps;
+      const fpsInput = $('#frameFps'); if (fpsInput) fpsInput.value = String(action.fps);
+    }
 
     this.resetLog();
     this.disabled(true);
@@ -162,6 +178,8 @@ export class ChatPanel {
           neuralPrompt: brief,
           frameCount,
           animation: this.app.animation,
+          annotations: this.app.annotations || [],
+          action: actionId,
           onEvent: (e) => this.onEvent(e, isDemo),
         });
 
@@ -170,6 +188,9 @@ export class ChatPanel {
 
     try {
       await this.agent.run(brief, { region });
+    } catch (err) {
+      this.setStatus(`生成失败：${err?.message || err}`, 'err');
+      toast(`生成失败：${err?.message || err}`, 'err');
     } finally {
       this.disabled(false);
       this.app.refreshLayers();
@@ -280,7 +301,7 @@ export class ChatPanel {
       el('span', { class: 'round-no', text: `#${it.index + 1}` }),
       it.role ? el('span', { class: `round-role ${it.role}`, text: it.roleName || it.role }) : null,
       it.frameTotal > 1 ? el('span', { class: 'round-mode', text: `帧 ${it.frame + 1}/${it.frameTotal}` }) : null,
-      el('span', { class: 'round-mode', text: it.mode === 'replace' ? '整幅' : '增量' }),
+      el('span', { class: 'round-mode', text: it.diff ? '差分' : (it.mode === 'replace' ? '整幅' : '增量') }),
       el('span', { text: `改动 ${report.changed} px · ${report.ops} 条指令 · ${report.elapsedMs}ms` }),
       ...(backendLabel ? [el('span', { class: 'round-mode', text: backendLabel })] : []),
       el('span', { class: 'round-stat', html: `第 <b>${total}</b>/${this.app.settings.maxIterations || 6} 轮` }),
@@ -290,6 +311,16 @@ export class ChatPanel {
 
     const info = el('div', { class: 'round-info' });
     info.append(el('div', { class: 'round-text', text: (it.text || '').replace(/```[\s\S]*?```/g, '').trim() || '（无说明文字）' }));
+
+    // 差分视图：+ 绿 / - 红 / @@ 块头
+    if (it.scriptDiff) {
+      const box = el('pre', { class: 'round-diff' });
+      for (const line of it.scriptDiff.split('\n')) {
+        const cls = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('@@') ? 'hunk' : '';
+        box.append(el('span', { class: `dl ${cls}`, text: `${line}\n` }));
+      }
+      info.append(box);
+    }
 
     if (!ok) {
       info.append(el('ul', { class: 'err-list' }, report.errors.map((m) => el('li', { text: m }))));
@@ -302,13 +333,13 @@ export class ChatPanel {
       el('button', {
         class: 'btn small ghost',
         text: '载入脚本',
-        onclick: () => this.app.loadScript(it.script),
+        onclick: () => this.app.loadScript(it.canonicalScript || it.script),
       }),
       el('button', {
         class: 'btn small ghost',
         text: '复制',
         onclick: async () => {
-          try { await navigator.clipboard?.writeText(it.script); } catch { /* 无剪贴板权限 */ }
+          try { await navigator.clipboard?.writeText(it.canonicalScript || it.script); } catch { /* 无剪贴板权限 */ }
           toast('脚本已复制', 'ok', 1500);
         },
       }),

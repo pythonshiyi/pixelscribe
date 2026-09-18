@@ -167,8 +167,13 @@ export function encodePNGScaled(rgba, width, height, outWidth, outHeight) {
 
 /** 上传给视觉模型的 data URL */
 export function toDataURL(rgba, width, height, longEdge = 384) {
-  const scale = Math.max(1, Math.round(longEdge / Math.max(width, height)));
-  const ow = width * scale, oh = height * scale;
+  const maxEdge = Math.max(width, height);
+  // 画布大于 longEdge 时按小数比例缩小，否则会一直回灌原始分辨率的巨图。
+  const scale = maxEdge > longEdge
+    ? longEdge / maxEdge
+    : Math.max(1, Math.round(longEdge / maxEdge));
+  const ow = Math.max(1, Math.round(width * scale));
+  const oh = Math.max(1, Math.round(height * scale));
   const png = encodePNGScaled(rgba, width, height, ow, oh);
   return `data:image/png;base64,${toBase64(png)}`;
 }

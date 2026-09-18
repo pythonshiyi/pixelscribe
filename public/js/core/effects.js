@@ -73,13 +73,18 @@ function normalizeColor(c) {
 export function surfaceNormals(buf, strength = 2) {
   const { width: w, height: h } = buf;
   const { L } = luminanceField(buf);
+  return normalsFromField(L, w, h, strength);
+}
+
+/** 由预计算的亮度场推导法线，供 relief / specular 共享一次计算。 */
+function normalsFromField(L, w, h, strength) {
   const N = new Float32Array(w * h * 3);
   const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : L[y * w + x]);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const gx = (at(x + 1, y) - at(x - 1, y)) * 0.5;
       const gy = (at(x, y + 1) - at(x, y - 1)) * 0.5;
-      let nx = -gx * strength, ny = -gy * strength, nz = 1;
+      const nx = -gx * strength, ny = -gy * strength, nz = 1;
       const len = Math.hypot(nx, ny, nz) || 1;
       const i = (y * w + x) * 3;
       N[i] = nx / len; N[i + 1] = ny / len; N[i + 2] = nz / len;
@@ -98,7 +103,8 @@ export function applyRelief(buf, opts = {}) {
   const ambient = opts.ambient == null ? 0.35 : clamp01(Number(opts.ambient));
   if (strength <= 0) return;
   const lights = normalizeLights(opts.lights);
-  const N = surfaceNormals(buf, opts.normalStrength == null ? 2 : Number(opts.normalStrength));
+  // 复用外部传入的法线（管线里 relief/specular 共享一次），避免重复全画布计算。
+  const N = opts.normals || surfaceNormals(buf, opts.normalStrength == null ? 2 : Number(opts.normalStrength));
   const { width: w } = buf;
   const { data } = buf;
   const n = w * buf.height;
@@ -129,8 +135,13 @@ export function applySpecular(buf, opts = {}) {
   const strength = opts.strength == null ? 0.6 : Number(opts.strength);
   if (strength <= 0) return;
   const power = opts.power == null ? 16 : Math.max(1, Number(opts.power));
-  const lights = normalizeLights(opts.lights);
-  const N = surfaceNormals(buf, opts.normalStrength == null ? 2 : Number(opts.normalStrength));
+  // 半程向量只与光源/视点有关，逐像素重复 Math.hypot 是纯浪费——提前算好。
+  const lights = normalizeLights(opts.lights).map((l) => {
+    const hx = l.x, hy = l.y, hz = l.z + 1;
+    const hl = Math.hypot(hx, hy, hz) || 1;
+    return { ...l, hx: hx / hl, hy: hy / hl, hz: hz / hl };
+  });
+  const N = opts.normals || surfaceNormals(buf, opts.normalStrength == null ? 2 : Number(opts.normalStrength));
   const { data } = buf;
   const n = buf.width * buf.height;
   for (let i = 0; i < n; i++) {
@@ -139,11 +150,7 @@ export function applySpecular(buf, opts = {}) {
     const nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
     let sr = 0, sg = 0, sb = 0;
     for (const l of lights) {
-      // 半程向量（视点 (0,0,1)）
-      let hx = l.x, hy = l.y, hz = l.z + 1;
-      const hl = Math.hypot(hx, hy, hz) || 1;
-      hx /= hl; hy /= hl; hz /= hl;
-      const dot = Math.max(0, nx * hx + ny * hy + nz * hz);
+      const dot = Math.max(0, nx * l.hx + ny * l.hy + nz * l.hz);
       const k = Math.pow(dot, power) * l.strength * strength;
       if (k <= 0.001) continue;
       sr += k * l.color.r; sg += k * l.color.g; sb += k * l.color.b;
@@ -301,8 +308,10 @@ export function applyTone(buf, opts = {}) {
 /* ───────────────────────── 程序化材质（fBm 噪声） ───────────────────────── */
 
 function hash2(x, y, seed) {
-  let h = (x * 374761393 + y * 668265263 + seed * 2147483647) | 0;
-  h = (h ^ (h >>> 13)) * 1274126177;
+  // 用 Math.imul 做 32 位乘法：seed*2147483647 在 seed≈1e9 时超过 2^53，
+  // 浮点乘法会丢精度导致噪声相关。
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 2147483647)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
@@ -318,8 +327,8 @@ function valueNoise(x, y, seed) {
   return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
 }
 
-/** 分形布朗运动（多倍频值噪声），返回 0..1 */
-export function fbm2(x, y, { octaves = 4, scale = 4, lacunarity = 2, gain = 0.5, seed = 1 } = {}) {
+/** 分形布朗运动核心（参数展开，避免逐像素构造 options 对象）。返回 0..1 */
+function fbmValue(x, y, octaves, scale, lacunarity, gain, seed) {
   let amp = 0.5, freq = 1 / Math.max(0.001, scale), sum = 0, norm = 0;
   for (let o = 0; o < octaves; o++) {
     sum += amp * valueNoise(x * freq, y * freq, seed + o * 101);
@@ -328,6 +337,11 @@ export function fbm2(x, y, { octaves = 4, scale = 4, lacunarity = 2, gain = 0.5,
     freq *= lacunarity;
   }
   return norm > 0 ? sum / norm : 0;
+}
+
+/** 分形布朗运动（多倍频值噪声），返回 0..1 */
+export function fbm2(x, y, { octaves = 4, scale = 4, lacunarity = 2, gain = 0.5, seed = 1 } = {}) {
+  return fbmValue(x, y, octaves, scale, lacunarity, gain, seed);
 }
 
 /**
@@ -349,7 +363,7 @@ export function applyFbm(buf, opts = {}) {
   for (let y = y0; y < y0 + h0; y++) {
     for (let x = x0; x < x0 + w0; x++) {
       if (!buf.inBounds(x, y)) continue;
-      const t = fbm2(x, y, { octaves, scale, seed: base });
+      const t = fbmValue(x, y, octaves, scale, 2, 0.5, base);
       if (mode === 'fill') {
         buf.set(x, y, {
           r: Math.round(c1.r + (c2.r - c1.r) * t),
@@ -411,8 +425,10 @@ export function applyProceduralPipeline(buf, style, opts = {}) {
   const key = normalizeStyle(style);
   const preset = STYLE_PRESETS[key];
   if (!preset || key === 'pixel') return key;
-  if (preset.relief) applyRelief(buf, { ...preset.relief, lights: opts.lights });
-  if (preset.specular) applySpecular(buf, { ...preset.specular, lights: opts.lights });
+  // relief 与 specular 共用同一份法线场，避免各自重复做一遍全画布推导。
+  const normals = (preset.relief || preset.specular) ? surfaceNormals(buf, 2) : null;
+  if (preset.relief) applyRelief(buf, { ...preset.relief, lights: opts.lights, normals });
+  if (preset.specular) applySpecular(buf, { ...preset.specular, lights: opts.lights, normals });
   if (preset.bloom) applyBloom(buf, preset.bloom);
   if (preset.tone) applyTone(buf, preset.tone);
   return key;

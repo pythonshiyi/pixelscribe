@@ -9,6 +9,7 @@
 import { encodePNG, encodePNGScaled, toBase64 } from '../io/png.js';
 import { controlMaps as buildControlMaps, controlMapDataURL, bufferDataURL } from './backends.js';
 import { supersample } from './supersample.js';
+import { bakeAnnotations, drawAnnotations, normalizeMarks } from './annotations.js';
 
 /** 与 UI 主题配套的画布配色（棋盘底 / 网格 / 边框 / 对称轴）。 */
 const THEMES = {
@@ -54,6 +55,10 @@ export class Renderer {
     this._onionCanvas = document.createElement('canvas');
     /** @type {{x:number,y:number,w:number,h:number}|null} */
     this.selection = null;
+    /** 画布标注（Point & Talk） */
+    this.annotations = [];
+    /** 正在拖拽的标注预览矩形 */
+    this.annotPreview = null;
     /** @type {{x:number,y:number}|null} */
     this.hover = null;
     this.checkerSize = 6;
@@ -174,8 +179,13 @@ export class Renderer {
     const ox = Math.round(this.offsetX);
     const oy = Math.round(this.offsetY);
 
+    // composite() 在未 invalidate 时返回同一对象 → 复用其 ImageData，避免每帧全量拷贝。
     const composite = doc.composite();
-    this.offCtx.putImageData(composite.toImageData(), 0, 0);
+    if (this._compositeRef !== composite || !this._compositeImage) {
+      this._compositeImage = composite.toImageData();
+      this._compositeRef = composite;
+    }
+    if (this._compositeImage) this.offCtx.putImageData(this._compositeImage, 0, 0);
 
     if (!this._checkerPattern) this._checkerPattern = this._makeChecker();
     ctx.save();
@@ -223,22 +233,26 @@ export class Renderer {
       const gx1 = Math.min(doc.width, Math.ceil((canvas.width - ox) / this.scale));
       const gy0 = Math.max(0, Math.floor((0 - oy) / this.scale));
       const gy1 = Math.min(doc.height, Math.ceil((canvas.height - oy) / this.scale));
-      for (let x = gx0; x <= gx1; x++) {
-        ctx.strokeStyle = x % 8 === 0 ? T.gridStrong : T.grid;
-        const px = ox + x * this.scale + 0.5;
+      // 批量描边：普通线与 8 的倍数强线各一次 stroke，避免大画布数百次状态切换。
+      const strokeGrid = (strong) => {
+        ctx.strokeStyle = strong ? T.gridStrong : T.grid;
         ctx.beginPath();
-        ctx.moveTo(px, oy);
-        ctx.lineTo(px, oy + h);
+        for (let x = gx0; x <= gx1; x++) {
+          if ((x % 8 === 0) !== strong) continue;
+          const px = ox + x * this.scale + 0.5;
+          ctx.moveTo(px, oy);
+          ctx.lineTo(px, oy + h);
+        }
+        for (let y = gy0; y <= gy1; y++) {
+          if ((y % 8 === 0) !== strong) continue;
+          const py = oy + y * this.scale + 0.5;
+          ctx.moveTo(ox, py);
+          ctx.lineTo(ox + w, py);
+        }
         ctx.stroke();
-      }
-      for (let y = gy0; y <= gy1; y++) {
-        ctx.strokeStyle = y % 8 === 0 ? T.gridStrong : T.grid;
-        const py = oy + y * this.scale + 0.5;
-        ctx.beginPath();
-        ctx.moveTo(ox, py);
-        ctx.lineTo(ox + w, py);
-        ctx.stroke();
-      }
+      };
+      strokeGrid(false);
+      strokeGrid(true);
     }
 
     ctx.restore();
@@ -278,6 +292,14 @@ export class Renderer {
       ctx.restore();
     }
 
+    // 画布标注：与选区区分色（品红），带编号
+    if (this.annotations?.length) {
+      drawAnnotations(ctx, this.annotations, { ox, oy, scale: this.scale });
+    }
+    if (this.annotPreview) {
+      drawAnnotations(ctx, [this.annotPreview], { ox, oy, scale: this.scale });
+    }
+
     if (this.hover && this.hover.x >= 0 && this.hover.y >= 0 &&
         this.hover.x < doc.width && this.hover.y < doc.height) {
       ctx.save();
@@ -299,16 +321,32 @@ export class Renderer {
    * @returns {{dataURL:string,width:number,height:number,scale:number}}
    */
   export(longEdge = 512, withBackground = false) {
-    const doc = this.doc;
-    const scale = Math.max(1, Math.round(longEdge / Math.max(doc.width, doc.height)));
-    const ow = doc.width * scale, oh = doc.height * scale;
-    const px = doc.composite().data;
+    return this.exportBufferDataURL(this.doc.composite(), longEdge, withBackground);
+  }
+
+  /**
+   * 编码任意缓冲为 PNG dataURL（供导出 / 带标注的视觉回灌复用）。
+   * @param {import('./buffer.js').PixelBuffer} buffer
+   * @param {number} longEdge
+   * @param {boolean} [withBackground]
+   */
+  exportBufferDataURL(buffer, longEdge = 512, withBackground = false) {
+    const { width, height, data: px } = buffer;
+    const maxEdge = Math.max(width, height);
+    // 需要缩小（如视觉回灌长边 384 < 画布）时用小数比例，避免 Math.max(1,·) 导致不缩小。
+    const scale = maxEdge > longEdge
+      ? longEdge / maxEdge
+      : Math.max(1, Math.round(longEdge / maxEdge));
+    const ow = Math.max(1, Math.round(width * scale));
+    const oh = Math.max(1, Math.round(height * scale));
     let png;
     if (withBackground) {
       const flat = new Uint8ClampedArray(ow * oh * 4);
       for (let y = 0; y < oh; y++) {
+        const sy = Math.min(height - 1, Math.floor(y / scale));
         for (let x = 0; x < ow; x++) {
-          const si = (Math.floor(y / scale) * doc.width + Math.floor(x / scale)) * 4;
+          const sx = Math.min(width - 1, Math.floor(x / scale));
+          const si = (sy * width + sx) * 4;
           const di = (y * ow + x) * 4;
           const a = px[si + 3] / 255;
           flat[di] = Math.round(px[si] * a + 255 * (1 - a));
@@ -319,7 +357,7 @@ export class Renderer {
       }
       png = encodePNG(flat, ow, oh);
     } else {
-      png = encodePNGScaled(px, doc.width, doc.height, ow, oh);
+      png = encodePNGScaled(px, width, height, ow, oh);
     }
     return { dataURL: `data:image/png;base64,${toBase64(png)}`, width: ow, height: oh, scale };
   }
@@ -350,8 +388,18 @@ export class Renderer {
     return { dataURL: `data:image/png;base64,${toBase64(png)}`, width: up.width, height: up.height, scale };
   }
 
-  /** 供视觉回灌使用：放大到长边 longEdge，不垫底色（保留透明） */
-  visionDataURL(longEdge = 384) {
+  /**
+   * 供视觉回灌使用：缩放/放大到长边 longEdge，不垫底色（保留透明）。
+   * 若传标注，则把标注烘焙进副本图，让模型"看见"用户指的区域。
+   * @param {number} [longEdge]
+   * @param {Array<{x:number,y:number,w:number,h:number}>|null} [annotations]
+   */
+  visionDataURL(longEdge = 384, annotations = null) {
+    if (annotations?.length) {
+      const copy = this.doc.composite().clone();
+      bakeAnnotations(copy, normalizeMarks(annotations, copy.width, copy.height));
+      return this.exportBufferDataURL(copy, longEdge, false).dataURL;
+    }
     return this.export(longEdge, false).dataURL;
   }
 

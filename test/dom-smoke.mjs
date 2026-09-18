@@ -560,6 +560,49 @@ ok('主题切换（白天 / 暗色）', () => {
   eq(app.settings.theme, 'dark');
 });
 
+ok('AI 面板含动作预设下拉', () => {
+  assert($('#aiAction'), '缺少动作下拉');
+  const opts = [...$('#aiAction').options].map((o) => o.value);
+  for (const id of ['idle', 'walk', 'run', 'attack', 'jump']) assert(opts.includes(id), `缺少动作 ${id}`);
+});
+
+ok('瓦片/无缝对话框可打开并无缝化', () => {
+  app.doc.resize(16, 16);
+  const buf = app.doc.activeLayer.buffer;
+  for (let i = 0; i < buf.u32.length; i++) buf.u32[i] = (0xff000000 | ((i * 37) & 0x00ffffff)) >>> 0;
+  app.doc.invalidate();
+  app.tilesetDialog();
+  assert($('#tsAxis') && $('#tsBand'), '缺少瓦片选项');
+  const btn = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('无缝化'));
+  assert(btn, '缺少无缝化按钮');
+  btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  window.document.querySelector('#modalClose')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+});
+
+ok('标注可添加/清除并进入视觉回灌', () => {
+  app.clearAnnotations();
+  assert($('#btnAnnotClear'), '缺少清除标注按钮');
+  app.addAnnotation({ x: 4, y: 4, w: 6, h: 5 });
+  eq(app.annotations.length, 1, '应添加 1 个标注');
+  eq(app.renderer.annotations, app.annotations, 'renderer 应共享同一标注数组');
+  const url = app.renderer.visionDataURL(64, app.annotations);
+  assert(url.startsWith('data:image/png;base64,'), '带标注的视觉回灌应产出 PNG');
+  app.clearAnnotations();
+  eq(app.annotations.length, 0, '清除后应为空');
+});
+
+ok('设置保存保留主题与自定义风格预设', () => {
+  app.settings.theme = 'light';
+  app.settings.stylePresets = [{ name: '我的预设', style: 'painting' }];
+  $('#btnSettings').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const save = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('保存'));
+  save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.settings.theme, 'light', '主题不应被设置保存清空');
+  eq(app.settings.stylePresets.length, 1, '自定义风格预设不应被设置保存清空');
+  app.settings.theme = 'dark';
+  app.settings.stylePresets = [];
+});
+
 ok('作品面板存在（文件空间）', () => {
   assert($('#galleryGrid'), '缺少 #galleryGrid');
   assert($('#galleryPath'), '缺少 #galleryPath');
@@ -722,6 +765,21 @@ ok('方向键平移浮动选区 / Ctrl+A 全选', () => {
   app.tools.commitFloating?.();
   key('a', { ctrlKey: true });
   assert(app.renderer.selection && app.renderer.selection.w === app.doc.width, 'Ctrl+A 应全选');
+});
+
+ok('移动选区不丢失像素（曾因共享 scratch 被清空）', () => {
+  app.doc.resize(32, 32);
+  app.doc.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+  app.doc.activeLayer.buffer.fillRect(8, 8, 8, 8, { r: 255, g: 0, b: 0, a: 255 }, false);
+  app.doc.invalidate();
+  app.renderer.selection = { x: 8, y: 8, w: 8, h: 8 };
+  const before = app.doc.activeLayer.buffer.opaqueCount();
+  app.tools.beginSelect({ x: 9, y: 9 });
+  app.tools.updateSelect({ x: 12, y: 13 }, false);
+  app.tools.endSelect();
+  eq(app.doc.activeLayer.buffer.opaqueCount(), before, '移动后不透明像素数应不变');
+  eq(app.doc.activeLayer.buffer.get(12, 13).a, 255, '内容应移动到新位置');
+  eq(app.doc.activeLayer.buffer.get(8, 8).a, 0, '原位置应清空');
 });
 
 ok('图层组编组与解散', () => {

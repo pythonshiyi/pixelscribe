@@ -396,22 +396,22 @@ export function floodFill(buf, x, y, c) {
  * @param {PixelBuffer} buf @param {RGBA} c @param {boolean} [inside] true 则描在内侧
  */
 export function outline(buf, c, inside = false) {
-  const src = buf.snapshot();
-  const get = (x, y) => (x < 0 || y < 0 || x >= buf.width || y >= buf.height ? 0 : new Uint32Array(src.buffer)[y * buf.width + x]);
   const w = buf.width, h = buf.height;
-  const u32 = new Uint32Array(src.buffer);
+  // u32 视图只构建一次（此前在 get() 内每次邻域探测都新建，O(W·H) 次分配）。
+  const u32 = new Uint32Array(buf.snapshot().buffer);
+  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : u32[y * w + x]);
   for (let y = 0; y < h; y++) {
+    const row = y * w;
     for (let x = 0; x < w; x++) {
-      const cur = u32[y * w + x];
-      const opaque = (cur >>> 24) !== 0;
+      const opaque = (u32[row + x] >>> 24) !== 0;
       if (inside) {
         if (!opaque) continue;
-        if (get(x - 1, y) === 0 || get(x + 1, y) === 0 || get(x, y - 1) === 0 || get(x, y + 1) === 0) {
+        if (at(x - 1, y) === 0 || at(x + 1, y) === 0 || at(x, y - 1) === 0 || at(x, y + 1) === 0) {
           buf.plot(x, y, c);
         }
       } else {
         if (opaque) continue;
-        if (get(x - 1, y) !== 0 || get(x + 1, y) !== 0 || get(x, y - 1) !== 0 || get(x, y + 1) !== 0) {
+        if (at(x - 1, y) !== 0 || at(x + 1, y) !== 0 || at(x, y - 1) !== 0 || at(x, y + 1) !== 0) {
           buf.plot(x, y, c);
         }
       }

@@ -1,0 +1,11 @@
+{
+  "note": "离线 DemoProvider 基线；真实模型分数会更高。用 npm run bench:check 做回归。",
+  "tolerance": 3,
+  "overall": { "count": 12, "mean": 84, "min": 83, "max": 86 },
+  "byCategory": {
+    "creature": { "count": 3, "mean": 83, "min": 83, "max": 83 },
+    "item": { "count": 3, "mean": 83.67, "min": 83, "max": 84 },
+    "ui": { "count": 3, "mean": 86, "min": 86, "max": 86 },
+    "scene": { "count": 3, "mean": 83.33, "min": 83, "max": 84 }
+  }
+}

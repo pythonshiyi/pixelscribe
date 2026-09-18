@@ -5,14 +5,14 @@
  * 从而自动获得对称、参数校验与一致语义。
  */
 
-import { symmetryTransforms, floodFill } from '../core/buffer.js';
+import { symmetryTransforms, floodFill, PixelBuffer } from '../core/buffer.js';
 import { drawLine as pxLine } from '../core/buffer.js';
 import { parseColor } from '../util/color.js';
 import { runScript } from '../lang/compiler.js';
 
 const TOOL_NAMES = {
   pencil: '铅笔', eraser: '橡皮', bucket: '油漆桶', dropper: '吸管',
-  line: '直线', rect: '矩形', circle: '椭圆', select: '选区',
+  line: '直线', rect: '矩形', circle: '椭圆', select: '选区', annotate: '标注',
 };
 
 export class Tools {
@@ -37,6 +37,10 @@ export class Tools {
   setTool(t) {
     if (this.floating) this.commitFloating();
     this.tool = t;
+    if (t !== 'annotate') {
+      this.app.renderer.annotPreview = null;
+      this.app.requestRender();
+    }
     this.app.onToolChange?.(t);
   }
 
@@ -71,16 +75,26 @@ export class Tools {
 
   onDown(e) {
     const app = this.app;
-    if (app.doc.activeLayer.locked) {
-      app.warn('当前图层已锁定');
-      return;
-    }
-    this.stage.setPointerCapture?.(e.pointerId);
+    this.stage?.setPointerCapture?.(e.pointerId);
     const p = this.pick(e);
     this.start = { ...p };
     this.last = { ...p };
     this.button = e.button;
     this.moved = false;
+
+    // 标注不修改图层，故不受图层锁定限制
+    if (this.tool === 'annotate' && !e.altKey) {
+      this.active = true;
+      this.annotStart = { ...p };
+      app.renderer.annotPreview = { x: p.x, y: p.y, w: 1, h: 1 };
+      app.requestRender();
+      return;
+    }
+
+    if (app.doc.activeLayer.locked) {
+      app.warn('当前图层已锁定');
+      return;
+    }
 
     if (e.button === 1 || app.spaceDown) {
       this.panning = true;
@@ -134,6 +148,12 @@ export class Tools {
       return;
     }
 
+    if (this.tool === 'annotate' && this.active) {
+      app.renderer.annotPreview = this._rectTo(this.annotStart, p);
+      app.requestRender();
+      return;
+    }
+
     if (!this.active) { app.requestRender(); return; }
 
     const dist = Math.abs(p.x - this.start.x) + Math.abs(p.y - this.start.y);
@@ -156,6 +176,14 @@ export class Tools {
     if (this.panning) { this.panning = false; this.stage?.classList.remove('panning'); return; }
     if (!this.active) return;
     this.active = false;
+
+    if (this.tool === 'annotate') {
+      const p = this.pick(e);
+      app.renderer.annotPreview = null;
+      app.addAnnotation?.(this._rectTo(this.annotStart, p));
+      app.requestRender();
+      return;
+    }
 
     if (this.tool === 'select') { this.endSelect(); return; }
 
@@ -322,10 +350,18 @@ export class Tools {
     return p.x >= s.x && p.y >= s.y && p.x < s.x + s.w && p.y < s.y + s.h;
   }
 
+  /** 由起止点得到规范化矩形（含端点，至少 1×1）。 */
+  _rectTo(a, b) {
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x, y, w: Math.abs(b.x - a.x) + 1, h: Math.abs(b.y - a.y) + 1 };
+  }
+
   liftSelection(sel) {
     const app = this.app;
     const buf = app.doc.activeLayer.buffer;
-    const cut = app.scratch();
+    // 必须用独立缓冲保存抬起内容：app.scratch() 是共享缓冲，buildFloatingPreview 会把它清空，
+    // 导致预览/落回内容丢失、原选区像素被删除。
+    const cut = new PixelBuffer(sel.w, sel.h);
     const empty = { r: 0, g: 0, b: 0, a: 0 };
     for (let y = 0; y < sel.h; y++) {
       for (let x = 0; x < sel.w; x++) {
@@ -356,7 +392,8 @@ export class Tools {
     if (this.selectMode === 'moving') {
       const sel = this.app.renderer.selection;
       const { dx, dy, cut } = this.floating || {};
-      if (cut && (dx || dy)) {
+      // 无论是否移动都要写回：内容在 liftSelection 时已从图层抬起，不写回等于删除。
+      if (cut && sel) {
         const buf = this.app.doc.activeLayer.buffer;
         for (let y = 0; y < sel.h; y++) {
           for (let x = 0; x < sel.w; x++) {

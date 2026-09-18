@@ -133,7 +133,7 @@ export function encodeGIF(frames, opts) {
   // Logical Screen Descriptor
   push16(width); push16(height);
   push(0x80 | 0x70 | (bits - 1)); // GCT=1, color res=7, sort=0, size
-  push(0); // background color index
+  push(transparentIndex); // 背景索引=透明索引，disposal=2 恢复背景时才会清成透明
   push(0); // pixel aspect ratio
 
   // Global Color Table

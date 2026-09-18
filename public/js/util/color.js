@@ -81,7 +81,13 @@ export function rgbaToHex(c, withAlpha = false) {
  * @param {RGBA} c
  */
 export function pack(c) {
-  return ((c.a << 24) | (c.b << 16) | (c.g << 8) | c.r) >>> 0;
+  // 通道必须夹取并取整：直接位移会让 256 的 r 溢出到 g、浮点值被静默截断而串色。
+  return (
+    (clamp255(Math.round(c.a)) << 24)
+    | (clamp255(Math.round(c.b)) << 16)
+    | (clamp255(Math.round(c.g)) << 8)
+    | clamp255(Math.round(c.r))
+  ) >>> 0;
 }
 
 /**
@@ -189,4 +195,33 @@ export function parseColor(token, palette) {
 /** @param {RGBA} c @param {number} k */
 export function scaleAlpha(c, k) {
   return { ...c, a: clamp255(Math.round(c.a * k)) };
+}
+
+/* ── 字节 ↔ 十六进制（大文档序列化热路径，查表 + 字符码运算避免逐字节 toString/parseInt） ── */
+
+const HEX_BYTE = (() => {
+  const t = new Array(256);
+  for (let i = 0; i < 256; i++) t[i] = i.toString(16).padStart(2, '0');
+  return t;
+})();
+
+/** @param {Uint8ClampedArray|Uint8Array|number[]} arr */
+export function bytesToHex(arr) {
+  let s = '';
+  for (let i = 0; i < arr.length; i++) s += HEX_BYTE[arr[i]];
+  return s;
+}
+
+/**
+ * @param {string} hex
+ * @param {Uint8ClampedArray|Uint8Array} [out] 写入目标（长度不足时按较短者）
+ */
+export function hexToBytes(hex, out) {
+  const n = Math.min(out ? out.length : (hex.length >> 1), hex.length >> 1);
+  const target = out || new Uint8ClampedArray(n);
+  const hexVal = (c) => (c <= 57 ? c - 48 : (c | 32) - 87);
+  for (let i = 0; i < n; i++) {
+    target[i] = (hexVal(hex.charCodeAt(i * 2)) << 4) | hexVal(hex.charCodeAt(i * 2 + 1));
+  }
+  return target;
 }

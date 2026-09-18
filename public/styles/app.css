@@ -440,6 +440,17 @@ textarea { line-height: 1.55; }
 }
 .round-actions { display: flex; gap: 6px; margin-top: auto; }
 
+.round-diff {
+  margin: 0; padding: 8px 10px; max-height: 150px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  white-space: pre; word-break: normal;
+}
+.round-diff .dl { display: block; color: var(--fg-2); }
+.round-diff .dl.add { color: #7ee08a; background: rgba(80, 200, 110, 0.12); }
+.round-diff .dl.del { color: #ff8b96; background: rgba(230, 80, 90, 0.12); }
+.round-diff .dl.hunk { color: var(--accent); opacity: 0.85; }
+
 .err-list { margin: 0; padding-left: 0; list-style: none; font-family: var(--mono); font-size: 11px; color: #ff8b96; }
 .err-list li { padding: 2px 0; }
 .warn-list { color: var(--warn); }

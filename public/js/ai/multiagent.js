@@ -56,7 +56,7 @@ function isVisionError(err) {
   const status = Number(err?.status || 0);
   if (![400, 404, 413, 415, 422].includes(status)) return false;
   const msg = String(err?.message || '').toLowerCase();
-  return /image|vision|multimodal|image_url|图片|图像|content.?type|unsupported|invalid.*content/.test(msg);
+  return /image|vision|multimodal|image_url|图片|图像|content.?type|unsupported|invalid.*content|request entity too large|payload too large|too large/.test(msg);
 }
 
 function stripImages(messages) {

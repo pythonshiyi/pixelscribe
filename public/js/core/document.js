@@ -4,7 +4,7 @@
 
 import { PixelBuffer } from './buffer.js';
 import { Palette } from './palette.js';
-import { pack, unpack, scaleAlpha, over } from '../util/color.js';
+import { pack, unpack, scaleAlpha, over, bytesToHex, hexToBytes } from '../util/color.js';
 
 /** @typedef {import('../util/color.js').RGBA} RGBA */
 
@@ -34,7 +34,7 @@ export class Layer {
 
   clone() {
     const l = Object.create(Layer.prototype);
-    l.id = this.id;
+    l.id = `L${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     l.name = this.name;
     l.buffer = this.buffer.clone();
     l.visible = this.visible;
@@ -145,24 +145,39 @@ export class PixelDocument {
    */
   _compose(skipKinds) {
     const out = new PixelBuffer(this.width, this.height);
+    const o = out.u32;
     for (const layer of this.layers) {
       if (skipKinds && skipKinds.has(layer.kind)) continue;
       if (!layer.visible || layer.opacity <= 0) continue;
-      const b = layer.buffer;
+      const b = layer.buffer.u32;
       const op = layer.opacity;
-      if (op >= 1) {
-        for (let i = 0; i < out.u32.length; i++) {
-          const s = b.u32[i];
-          if ((s >>> 24) === 0) continue;
-          if ((s >>> 24) === 255) { out.u32[i] = s; continue; }
-          out.u32[i] = pack(over(unpack(out.u32[i]), unpack(s)));
+      // 直接对 u32 做整数/浮点混合，避免每像素 unpack/over/pack 三次对象分配。
+      for (let i = 0; i < o.length; i++) {
+        const s = b[i];
+        const sa0 = s >>> 24;
+        if (sa0 === 0) continue;
+        if (op >= 1 && sa0 === 255) { o[i] = s; continue; }
+        const sa = op >= 1 ? sa0 : Math.round(sa0 * op);
+        if (sa === 0) continue;
+        const d = o[i];
+        const da = d >>> 24;
+        if (da === 0) {
+          o[i] = op >= 1 ? s : (((sa << 24) | (s & 0x00ffffff)) >>> 0);
+          continue;
         }
-      } else {
-        for (let i = 0; i < out.u32.length; i++) {
-          const s = b.u32[i];
-          if ((s >>> 24) === 0) continue;
-          out.u32[i] = pack(over(unpack(out.u32[i]), scaleAlpha(unpack(s), op)));
-        }
+        const sA = sa / 255, dA = da / 255;
+        const oa = sA + dA * (1 - sA);
+        const wd = dA * (1 - sA);
+        const mr = Math.round(((s & 0xff) * sA + (d & 0xff) * wd) / oa);
+        const mg = Math.round((((s >>> 8) & 0xff) * sA + ((d >>> 8) & 0xff) * wd) / oa);
+        const mb = Math.round((((s >>> 16) & 0xff) * sA + ((d >>> 16) & 0xff) * wd) / oa);
+        const ma = Math.round(oa * 255);
+        o[i] = (
+          ((ma < 0 ? 0 : ma > 255 ? 255 : ma) << 24)
+          | ((mb < 0 ? 0 : mb > 255 ? 255 : mb) << 16)
+          | ((mg < 0 ? 0 : mg > 255 ? 255 : mg) << 8)
+          | (mr < 0 ? 0 : mr > 255 ? 255 : mr)
+        ) >>> 0;
       }
     }
     return out;
@@ -215,12 +230,20 @@ export class PixelDocument {
     const i = this.activeLayerIndex;
     if (i <= 0) return false;
     const top = this.layers[i], bottom = this.layers[i - 1];
-    for (let k = 0; k < bottom.buffer.u32.length; k++) {
+    // 把底层 opacity 预先烘焙进合并结果，再把底层 opacity 归 1；
+    // 否则合成时底层 opacity 会二次作用到顶层内容上（顶层也被变半透明）。
+    const bop = bottom.opacity;
+    const bake = bop < 1;
+    const n = bottom.buffer.u32.length;
+    for (let k = 0; k < n; k++) {
+      const botU = bottom.buffer.u32[k];
+      const bot = bake ? scaleAlpha(unpack(botU), bop) : unpack(botU);
       const s = top.buffer.u32[k];
-      if ((s >>> 24) === 0 || !top.visible) continue;
+      if ((s >>> 24) === 0 || !top.visible) { bottom.buffer.u32[k] = bake ? pack(bot) : botU; continue; }
       const src = top.opacity >= 1 ? unpack(s) : scaleAlpha(unpack(s), top.opacity);
-      bottom.buffer.u32[k] = pack(over(unpack(bottom.buffer.u32[k]), src));
+      bottom.buffer.u32[k] = pack(over(bot, src));
     }
+    bottom.opacity = 1;
     this.layers.splice(i, 1);
     this.activeLayerIndex = i - 1;
     this.invalidate();
@@ -243,11 +266,6 @@ export class PixelDocument {
 
   /** 序列化为可 JSON 化的对象 */
   toJSON() {
-    const bytesToHex = (arr) => {
-      let s = '';
-      for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0');
-      return s;
-    };
     return {
       version: 1,
       width: this.width,
@@ -290,10 +308,7 @@ export class PixelDocument {
       if (lj.kind === 'neural') l.kind = 'neural';
       if (lj.meta) l.meta = lj.meta;
       if (lj.group) l.group = lj.group;
-      const hex = lj.data ?? '';
-      for (let i = 0; i < l.buffer.data.length && i * 2 < hex.length; i++) {
-        l.buffer.data[i] = parseInt(hex.substr(i * 2, 2), 16);
-      }
+      hexToBytes(lj.data ?? '', l.buffer.data);
       return l;
     });
     if (!doc.layers.length) doc.layers = [new Layer(json.width, json.height, '背景')];

@@ -79,6 +79,21 @@ F. ${styleLine}
 - 不要使用未在指令表中出现的命令，不要用 Markdown 表格/列表描述画面。
 - 颜色优先用 c0…c${docInfo.paletteSize - 1}，可对照上面的调色板速查选色。
 
+# 增量修改（差分协议，从第二轮起推荐）
+当画面上已有内容、只需局部改动时，**不要重画整幅**，而是输出一个 unified diff 代码块：
+\`\`\`pixelscript-diff
+@@ -3,4 +3,5 @@
+ ellipse 16 20 11 8 c3 fill
++circle 16 12 3 c7 fill
+-shade 8 7 16 16 c4 0.25
+ outline c1
+@@ ... @@
+\`\`\`
+规则：
+- 每行前缀：空格=上下文、\`-\`=删除、\`+\`=新增；至少保留上下各 1–2 行，便于引擎定位。
+- 只包含改动附近的行；引擎会把它应用到当前脚本，未提及的部分保持不变。
+- 若改动很大或拿不准，就直接输出完整的 \`\`\`pixelscript 代码块，两者都可以。
+
 # 示例
 \`\`\`pixelscript
 size 32 32
@@ -145,8 +160,8 @@ export function buildCritique(info) {
   const ascii = info.ascii ? `\n低分辨率网格预览（每个字符代表一个色块，. 为透明）：\n${info.ascii}\n` : '';
   const tiles = formatTiles(info.tiles);
   const modeHint = mode === 'append'
-    ? '下一轮请输出**增量**脚本：只写需要新增或覆盖的指令（不要重画全部内容）。'
-    : '下一轮如果修改，请输出完整的整幅脚本。';
+    ? '下一轮请做**增量**修改：优先用 ```pixelscript-diff 差分块只改需要变的部分；无法确定时再输出完整 ```pixelscript。'
+    : '下一轮如需修改，请用 ```pixelscript-diff 输出局部改动，或输出完整整幅脚本。';
   const pipelineHint = style !== 'pixel'
     ? '\n- 光照/材质是否到位？可追加 light / relief / specular / fbm / bloom / tone，并用 render 收尾。'
     : '';

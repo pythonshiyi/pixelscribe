@@ -97,6 +97,13 @@ export function estimateFlow(A, B, w, h, opts = {}) {
   const levels = Math.max(1, Math.min(3, Math.round(opts.levels ?? 3)));
   const baseBlock = Math.max(1, Math.round(opts.block || Math.max(2, Math.round(Math.min(w, h) / 16))));
   const fullRadius = Math.max(2, Math.round(opts.radius || Math.max(4, Math.round(Math.max(w, h) / 2))));
+  // 每个搜索半径都会带来 ≈4·面积·r² 次亮度采样；大画布全范围搜索会瞬间卡死标签页。
+  // 用工作量预算反推该层允许的最大半径（小画布不会触及上限，行为保持不变）。
+  const budget = Math.max(1e6, Number(opts.maxWork) || 2e8);
+  const clampRadius = (r, aw, ah) => {
+    const maxR = Math.max(2, Math.floor(Math.sqrt(budget / Math.max(1, 4 * aw * ah))));
+    return Math.max(2, Math.min(r, maxR));
+  };
   let prior = null;
 
   for (let lv = levels - 1; lv >= 0; lv--) {
@@ -106,10 +113,15 @@ export function estimateFlow(A, B, w, h, opts = {}) {
     const cA = s === 1 ? A : downsample(A, w, h, s);
     const cB = s === 1 ? B : downsample(B, w, h, s);
     // 最细层用全范围搜索（对像素画最稳）；粗层用小半径但覆盖大半画布
-    const radius = s === 1 ? fullRadius : Math.max(2, Math.round(Math.max(cw, ch) / 2));
+    const rawRadius = s === 1 ? fullRadius : Math.max(2, Math.round(Math.max(cw, ch) / 2));
+    const radius = clampRadius(rawRadius, cw, ch);
     const { f } = flowAtLevel(cA, cB, cw, ch, baseBlock, radius, s === 1 ? null : prior);
-    prior = s === 1 ? f : flowLevel(f, cw, ch, w, h);
     if (s === 1) { fillUnknown(f, new Uint8Array(w * h).fill(1), w, h, Math.max(w, h)); return f; }
+    // 先验必须缩放到「下一层」的尺寸；此前缩到全分辨率却被按半分辨率索引，空间完全错位。
+    const ns = s >> 1;
+    const nw = Math.max(1, Math.round(w / ns));
+    const nh = Math.max(1, Math.round(h / ns));
+    prior = flowLevel(f, cw, ch, nw, nh);
   }
   return prior || new Float32Array(w * h * 2);
 }

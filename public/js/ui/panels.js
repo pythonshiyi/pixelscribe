@@ -16,6 +16,8 @@ export function initLayers(app) {
   const opacityVal = $('#layerOpacityVal');
   const locked = $('#layerLocked');
   const collapsedGroups = new Set();
+  /** 图层缩略图缓存：文档版本号变化即整体失效（图层点击/显隐复用时不再重新编码） */
+  const thumbCache = new Map();
 
   $('#btnAddLayer').addEventListener('click', () => {
     app.history.begin('新建图层');
@@ -98,13 +100,31 @@ export function initLayers(app) {
   }
 
   function thumbURL(layer) {
+    const gen = app.docGen || 0;
+    const hit = thumbCache.get(layer.id);
+    if (hit && hit.gen === gen) return hit.url;
     const { width: w, height: h } = app.doc;
-    const out = new Uint8ClampedArray(w * h * 4);
-    for (let i = 0; i < out.length; i++) out[i] = layer.buffer.data[i];
+    // 缩略图降到 ~40px 长边即可，避免大画布每次都编码整幅图层。
+    const scale = Math.max(1, Math.ceil(Math.max(w, h) / 40));
+    const tw = Math.max(1, Math.ceil(w / scale));
+    const th = Math.max(1, Math.ceil(h / scale));
+    const out = new Uint8ClampedArray(tw * th * 4);
+    const src = layer.buffer.data;
+    for (let y = 0; y < th; y++) {
+      const sy = Math.min(h - 1, y * scale);
+      for (let x = 0; x < tw; x++) {
+        const sx = Math.min(w - 1, x * scale);
+        const si = (sy * w + sx) * 4, di = (y * tw + x) * 4;
+        out[di] = src[si]; out[di + 1] = src[si + 1]; out[di + 2] = src[si + 2]; out[di + 3] = src[si + 3];
+      }
+    }
     const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    c.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
-    return c.toDataURL();
+    c.width = tw; c.height = th;
+    c.getContext('2d').putImageData(new ImageData(out, tw, th), 0, 0);
+    const url = c.toDataURL();
+    thumbCache.set(layer.id, { gen, url });
+    if (thumbCache.size > 256) thumbCache.delete(thumbCache.keys().next().value);
+    return url;
   }
 
   /** 图层 + 组头，按显示顺序（顶层在上）。 */
@@ -463,6 +483,7 @@ export function initScript(app) {
   });
 
   $('#btnSamples').addEventListener('click', () => {
+    let closeModal = () => { document.querySelector('#modalBackdrop').hidden = true; };
     const body = el('div', { class: 'sample-list' });
     for (const s of SAMPLES) {
       body.append(el('button', {
@@ -472,11 +493,11 @@ export function initScript(app) {
           syncGutter();
           lint();
           run();
-          document.querySelector('#modalBackdrop').hidden = true;
+          closeModal();
         },
       }, [el('b', { text: s.name }), el('span', { text: s.desc })]));
     }
-    modal({
+    closeModal = modal({
       title: '示例库',
       body,
       actions: [{ label: '导出全部 (.pxs)', kind: 'ghost', onClick: () => downloadText('pixelscribe-samples.pxs', SAMPLES.map((s) => `# === ${s.name} ===\n${s.code}`).join('\n\n'), 'text/plain') }],

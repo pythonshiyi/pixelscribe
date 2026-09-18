@@ -93,6 +93,11 @@ PX_PORT=8080 npm start
 | **帧锁定** | 锁定关键帧，AI 生成/编辑不会改写，保证帧间一致性 |
 | **SVG 矢量导出** | 像素游程合并为 `<path>`，可导入 Figma / Illustrator / Web 继续编辑 |
 | **成本面板** | 实时统计 token 用量与花费估算，支持自定义单价与重置 |
+| **差分编辑** | 模型输出 unified diff，引擎应用到累积脚本；轮次卡片显示 +/− 差异，省 token、改一处不崩全身 |
+| **画布标注** | 标注工具（`N`）框出区域，回灌图上会带品红编号框，AI 按标注定向修改 |
+| **瓦片 / 无缝** | 无缝化边缘 + 平铺/错位预览 + 导出 Tiled tileset JSON（多帧即多瓦片） |
+| **动作动画** | 待机/行走/奔跑/攻击/施法/跳跃/受击/倒下预设，自动帧率与角色基线对齐 |
+| **质量基准** | `npm run bench`：golden prompt 集 + 启发式评分，可对提示词/DSL 改动做质量回归 |
 | **参考图引导** | 导入图片为参考层（不烘焙进成图），作为神经后端的 ControlNet 式引导 |
 | **大画布** | 画布最高 **2048²**；**百分比坐标**（`50%`）让模型不必心算大数字 |
 | **大画布回灌** | 画布超过阈值时，除整图外额外回灌**改动热区的原分辨率裁剪图**，让模型真正看见细节 |
@@ -185,12 +190,15 @@ render photo
 │     ├─ core/              引擎：palette buffer document history renderer animation
 │     │                     effects（程序化光照/材质/色调） backends（控制图/裁剪/后端路由）
 │     │                     supersample（平滑超分） easing（缓动） tween（补间） audio（音频/拍点） selection（选区运算） flow（光流） presets（风格预设）
-│     ├─ lang/              compiler（解析+执行） + font5x7
-│     ├─ ai/                provider（流式+视觉） prompts demo agent（闭环+导演+补间） multiagent（多智能体） cost（成本）
+│     │                     annotations（画布标注） tileset（无缝/瓦片/Tiled）
+│     ├─ lang/              compiler（解析+执行） scriptdiff（unified diff） + font5x7
+│     ├─ ai/                provider（流式+视觉） prompts demo agent（闭环+导演+补间+差分） multiagent（多智能体） cost（成本） actions（动作预设） quality（质量评分）
 │     └─ ui/                dom app tools panels chat gallery
+├─ bench/                   质量基准（prompts + quality-bench.mjs + baseline.json）
 └─ test/
-   ├─ selftest.mjs          单元 / 集成自测（315 项，含光流/成本/选区等）
-   └─ dom-smoke.mjs         jsdom 无头 UI 冒烟测试（94 项）
+   ├─ selftest.mjs          单元 / 集成自测（348 项，含差分/标注/瓦片/动作/评分等）
+   ├─ dom-smoke.mjs         jsdom 无头 UI 冒烟测试（99 项）
+   └─ server-smoke.mjs      真实进程 + HTTP 服务端冒烟（10 项）
 ```
 
 ---
@@ -284,6 +292,26 @@ AI 面板的「风格」下拉支持 `像素 / 手绘 / 水墨 / 动画 / 3D / �
 **参考图引导**：`导入` 图片时勾选「作为 AI 参考层」——图片以 40% 透明度垫在底层供你对照，
 但**不会烘焙进成图**；配置神经后端后，它会作为 ControlNet 式引导随请求发送（`reference` + `controls`）。
 
+### 差分编辑（省 token、局部可控）
+从第二轮起，模型可以只输出 ` ```pixelscript-diff ` unified diff（`+` 新增 / `-` 删除 / 空格上下文），
+引擎把它应用到**累积脚本**并重放，轮次卡片会显示 +/− 差异。改不动或拿不准时会自动回退整幅脚本，
+两者兼容，闭环不中断。脚本面板里的「载入脚本」载入的是该轮的累积脚本，可直接导出复现。
+
+### 画布标注（Point & Talk）
+左侧选**标注**工具（快捷键 `N`），在画布上拖出编号区域，可框多个。
+生成时这些标注会以品红编号框**烘焙进回灌图**，并附带坐标文字，模型据此"指哪改哪"。
+用左侧垃圾桶按钮清除全部标注；切换画布尺寸会自动清空。
+
+### 动作动画
+AI 面板「动作」下拉选择 `待机 / 行走 / 奔跑 / 攻击 / 施法 / 跳跃 / 受击 / 倒下`，
+会自动设定帧数与帧率，并把关键姿态约束写进每帧提示；生成结束后对角色底部基线做对齐，消除帧间抖动。
+
+### 瓦片 / 无缝
+`导出` → **瓦片/无缝…**：
+- **无缝化边缘**：让左右/上下边缘精确对齐，可平铺（可选过渡带宽）；
+- **错位视图**：半幅错位快速检查接缝；
+- **导出瓦片 PNG / Tiled JSON**：多帧时以帧为瓦片，同时导出精灵表 PNG 与 Tiled tileset JSON。
+
 ### 脚本模式
 右侧 **脚本面板** 直接手写 PixelScript，点「运行」。
 错误行会标红并给出 `line N: message`。
@@ -307,6 +335,10 @@ AI 面板的「风格」下拉支持 `像素 / 手绘 / 水墨 / 动画 / 3D / �
 | `PX_API_KEY` | *(空)* | 留空则进入演示模式 |
 | `PX_MODEL` | `deepseek-flash` | **必须是支持视觉输入的模型** |
 | `PX_PORT` | `5173` | 服务端口 |
+| `PX_HOST` | `127.0.0.1` | 监听地址；默认仅本机可访问。设为 `0.0.0.0` 才会对局域网/公网开放 |
+| `PX_AUTH_TOKEN` | *(空)* | 可选访问令牌。设置后非回环来源调用 `/api/*` 需带 `x-px-token`（或 `Authorization: Bearer`） |
+| `PX_RATE_LIMIT` | `60` | 每个来源 IP 每分钟允许的 LLM/渲染请求数，`0` 为不限流 |
+| `PX_STREAM_USAGE` | `on` | 是否请求上游在流式响应里返回 usage（成本统计用）；网关不认时自动去掉重试 |
 | `PX_TEMPERATURE` | `0.6` | 采样温度 |
 | `PX_MAX_ITERATIONS` | `6` | 闭环最大轮次 |
 | `PX_VISION_LONG_EDGE` | `384` | 回灌图长边像素 |
@@ -348,9 +380,12 @@ AI 面板的「风格」下拉支持 `像素 / 手绘 / 水墨 / 动画 / 3D / �
 ## 测试
 
 ```bash
-npm test           # 单元 + 集成 + 无头 UI 冒烟（共 409 项）
+npm test           # 单元 + 集成 + 无头 UI 冒烟 + 服务端冒烟（共 457 项）
 npm run test:unit  # 仅单元 / 集成（无需浏览器，含真实 HTTP 闭环）
 npm run test:dom   # 仅 jsdom 无头 UI 冒烟
+npm run test:server # 真实进程 + HTTP：信息泄露 / 非法 URI / SSRF / 作品库
+npm run bench      # 质量基准：golden prompt + 启发式评分（离线可跑）
+npm run bench:check # 与基线比较，质量退步则退出非零
 ```
 
 `test/selftest.mjs` 覆盖：颜色、调色板、像素缓冲图元、文档与图层、撤销栈、
@@ -382,13 +417,18 @@ SVG/WebM 导出、帧拖拽与锁定、成本面板、选区内生成、localSto
 
 ## 公网部署加固清单
 
-本服务默认面向本机开发。若需公网部署，请至少：
+本服务默认**只监听 `127.0.0.1`**，且服务端 Key 只会发往 `PX_BASE_URL` 配置的端点
+（请求体里的 `baseUrl` 仅在前端自带 Key 的直连模式下才会被采用，防止 SSRF/密钥外泄）。
+若确需对外服务，请至少：
 
-1. 增加鉴权（Basic / Token），限制 `/api/chat` 调用频率
-2. 收紧 `PX_TIMEOUT_MS` 与 `MAX_BODY`
-3. 置于反向代理（Nginx/Caddy）之后并启用 HTTPS
-4. 设置 `PX_API_KEY` 的用量上限与告警
-5. 关闭前端直连模式，强制走服务端代理
+1. 设置 `PX_AUTH_TOKEN`（非回环来源将强制校验令牌）
+2. 视需要调低 `PX_RATE_LIMIT`，限制 `/api/chat`、`/api/render` 频率
+3. 收紧 `PX_TIMEOUT_MS` 与 `MAX_BODY`
+4. 置于反向代理（Nginx/Caddy）之后并启用 HTTPS
+5. 设置 `PX_API_KEY` 的用量上限与告警
+6. 关闭前端直连模式，强制走服务端代理
+
+> 注意：设置 `PX_AUTH_TOKEN` 后，未携带令牌的远程访问会被拒绝；本机回环访问不受影响。
 
 ---
 

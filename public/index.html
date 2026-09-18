@@ -53,6 +53,7 @@
   <symbol id="i-rotl" viewBox="0 0 24 24"><path d="M4 12a8 8 0 118 8"/><path d="M4 8v4h4"/></symbol>
   <symbol id="i-rotr" viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-8 8"/><path d="M20 8v4h-4"/></symbol>
   <symbol id="i-group" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1"/><rect x="4" y="14" width="16" height="6" rx="1"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24" stroke-dasharray="4 2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -122,6 +123,7 @@
       <button class="tool" data-tool="rect" title="矩形 (R)"><svg><use href="#i-rect"/></svg></button>
       <button class="tool" data-tool="circle" title="椭圆 (O)"><svg><use href="#i-circle"/></svg></button>
       <button class="tool" data-tool="select" title="选区 (M)"><svg><use href="#i-select"/></svg></button>
+      <button class="tool" data-tool="annotate" title="标注并让 AI 修改该区域 (N)" aria-pressed="false"><svg><use href="#i-note"/></svg></button>
     </div>
 
     <div class="rail-sep"></div>
@@ -143,11 +145,12 @@
     <div class="rail-group small">
       <button class="tool" id="btnAddPaletteColor" title="新增颜色"><svg><use href="#i-plus"/></svg></button>
       <button class="tool" id="btnExtract" title="从图像提取色板"><svg><use href="#i-image"/></svg></button>
+      <button class="tool" id="btnAnnotClear" title="清除全部标注"><svg><use href="#i-trash"/></svg></button>
     </div>
   </aside>
 
   <section class="stage" id="stage">
-    <canvas id="stageCanvas"></canvas>
+    <canvas id="stageCanvas" role="img" aria-label="像素画布（使用左侧工具栏绘制）"></canvas>
     <div class="stage-hud" id="stageHud">—</div>
     <div class="stage-badge" id="stageBadge">32 × 32</div>
     <div class="frame-bar" id="frameBar">
@@ -168,12 +171,12 @@
   </section>
 
   <aside class="panel">
-    <nav class="tabs" id="tabs">
-      <button class="tab on" data-tab="ai"><svg><use href="#i-wand"/></svg><span>AI 生成</span></button>
-      <button class="tab" data-tab="script"><svg><use href="#i-code"/></svg><span>脚本</span></button>
-      <button class="tab" data-tab="layers"><svg><use href="#i-layers"/></svg><span>图层</span></button>
-      <button class="tab" data-tab="palette"><svg><use href="#i-palette"/></svg><span>色板</span></button>
-      <button class="tab" data-tab="gallery"><svg><use href="#i-folder"/></svg><span>作品</span></button>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="右侧面板">
+      <button class="tab on" data-tab="ai" role="tab" aria-selected="true"><svg><use href="#i-wand"/></svg><span>AI 生成</span></button>
+      <button class="tab" data-tab="script" role="tab" aria-selected="false"><svg><use href="#i-code"/></svg><span>脚本</span></button>
+      <button class="tab" data-tab="layers" role="tab" aria-selected="false"><svg><use href="#i-layers"/></svg><span>图层</span></button>
+      <button class="tab" data-tab="palette" role="tab" aria-selected="false"><svg><use href="#i-palette"/></svg><span>色板</span></button>
+      <button class="tab" data-tab="gallery" role="tab" aria-selected="false"><svg><use href="#i-folder"/></svg><span>作品</span></button>
     </nav>
 
     <div class="panes">
@@ -197,6 +200,19 @@
             <label class="switch" title="构图师 → 上色师 → 审查师 分工协作"><input type="checkbox" id="aiMulti" /><span>多智能体</span></label>
             <label class="mini-field"><span>轮次</span><input id="aiMaxIter" type="number" min="1" max="12" value="6" /></label>
             <label class="mini-field"><span>帧数</span><input id="aiFrames" type="number" min="1" max="24" value="1" title="生成 N 帧循环动画" /></label>
+            <label class="mini-field"><span>动作</span>
+              <select id="aiAction" title="动作预设：自动设定帧数与节奏，并给出关键姿态约束">
+                <option value="none" selected>无（自定义）</option>
+                <option value="idle">待机 idle</option>
+                <option value="walk">行走 walk</option>
+                <option value="run">奔跑 run</option>
+                <option value="attack">攻击 attack</option>
+                <option value="cast">施法 cast</option>
+                <option value="jump">跳跃 jump</option>
+                <option value="hit">受击 hit</option>
+                <option value="defeat">倒下 defeat</option>
+              </select>
+            </label>
             <label class="mini-field"><span>画布</span>
               <select id="aiSize">
                 <option value="16">16</option>
@@ -351,7 +367,7 @@ outline c1"></textarea>
 
 <!-- ── 模态 ── -->
 <div class="modal-backdrop" id="modalBackdrop" hidden>
-  <div class="modal" id="modalBox" role="dialog" aria-modal="true">
+  <div class="modal" id="modalBox" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <header class="modal-head"><h2 id="modalTitle">标题</h2><button class="tb" id="modalClose"><svg><use href="#i-x"/></svg></button></header>
     <div class="modal-body" id="modalBody"></div>
     <footer class="modal-foot" id="modalFoot"></footer>
@@ -360,7 +376,7 @@ outline c1"></textarea>
 
 <input type="file" id="filePicker" accept=".png,.pxs,.txt,image/*" hidden />
 <input type="file" id="audioPicker" accept="audio/*,.mp3,.ogg,.wav,.m4a,.flac" hidden />
-<div class="toast-host" id="toastHost"></div>
+<div class="toast-host" id="toastHost" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script type="module" src="js/main.js"></script>
 </body>

@@ -24,13 +24,17 @@ function hasLS() {
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (err) => { if (!settled) { settled = true; dbPromise = null; reject(err || new Error('IDB_OPEN_FAILED')); } };
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => { settled = true; req.result.onversionchange = () => req.result.close(); resolve(req.result); };
+    req.onerror = () => fail(req.error);
+    // 另一个标签页占用旧版本时 onblocked 会一直不触发 success——必须放行回退，否则所有调用永久挂起。
+    req.onblocked = () => fail(new Error('IDB_BLOCKED'));
   });
   return dbPromise;
 }
@@ -40,8 +44,10 @@ function lsGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
 }
 function lsSet(key, value) {
-  if (!hasLS()) { memory.set(key, value); return true; }
-  try { localStorage.setItem(key, value); return true; } catch { return false; }
+  // localStorage 只能存字符串：对象直接 setItem 会变成 "[object Object]"。
+  const v = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!hasLS()) { memory.set(key, v); return true; }
+  try { localStorage.setItem(key, v); return true; } catch { return false; }
 }
 function lsDel(key) {
   memory.delete(key);
@@ -59,6 +65,8 @@ export async function storeGet(key) {
         const rq = tx.objectStore(STORE).get(key);
         rq.onsuccess = () => resolve(rq.result ?? null);
         rq.onerror = () => reject(rq.error);
+        tx.onabort = () => reject(tx.error || new Error('IDB_TX_ABORT'));
+        tx.onerror = () => reject(tx.error);
       });
       if (value != null) return value;
     } catch { /* 回退 */ }
@@ -78,6 +86,7 @@ export async function storeSet(key, value) {
         tx.objectStore(STORE).put(value, key);
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('IDB_TX_ABORT'));
       });
       ok = true;
     } catch { /* 回退 */ }

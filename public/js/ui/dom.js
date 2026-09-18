@@ -63,11 +63,28 @@ export function modal(cfg) {
   body.replaceChildren(typeof cfg.body === 'string' ? el('p', { text: cfg.body }) : cfg.body);
   foot.replaceChildren();
 
+  const previouslyFocused = document.activeElement;
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     backdrop.hidden = true;
     document.removeEventListener('keydown', onKey);
+    // 无论用按钮 / Esc / 遮罩 / × 关闭，都通知调用方，避免 await 该模态的流程永久挂起。
+    try { cfg.onClose?.(); } catch { /* ignore */ }
+    try { previouslyFocused?.focus?.(); } catch { /* ignore */ }
   };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { close(); return; }
+    // 焦点陷阱：Tab 在模态内循环，避免焦点跑到背景页面。
+    if (e.key === 'Tab') {
+      const f = [...box.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')];
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
 
   for (const a of cfg.actions || []) {
     foot.append(el('button', {
@@ -84,6 +101,12 @@ export function modal(cfg) {
   backdrop.onclick = (e) => { if (e.target === backdrop) close(); };
   document.addEventListener('keydown', onKey);
   backdrop.hidden = false;
+  if (!box.hasAttribute('tabindex')) box.tabIndex = -1;
+  // 打开后把焦点移入模态（优先表单控件），关闭时再还给原元素。
+  requestAnimationFrame(() => {
+    const first = box.querySelector('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled])');
+    try { (first || box).focus(); } catch { /* ignore */ }
+  });
   return close;
 }
 

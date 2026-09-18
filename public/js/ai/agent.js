@@ -19,6 +19,9 @@
  */
 
 import { runScript, extractScript, isDone } from '../lang/compiler.js';
+import { unifiedDiff, applyUnifiedDiff, extractDiffBlock, splitLines } from '../lang/scriptdiff.js';
+import { describeAnnotations, normalizeMarks } from '../core/annotations.js';
+import { getAction } from './actions.js';
 import {
   buildSystemPrompt, buildUserBrief, buildCritique, buildRepair,
   buildPlanPrompt, buildDetailPrompt, computeTiles,
@@ -51,7 +54,8 @@ function isVisionError(err) {
   const status = Number(err?.status || 0);
   if (![400, 404, 413, 415, 422].includes(status)) return false;
   const msg = String(err?.message || '').toLowerCase();
-  return /image|vision|multimodal|image_url|图片|图像|content.?type|unsupported|invalid.*content/.test(msg);
+  // 兼容不支持图片 / 图片过大 / content-type 不合法 等各类网关报错。
+  return /image|vision|multimodal|image_url|图片|图像|content.?type|unsupported|invalid.*content|request entity too large|payload too large|too large/.test(msg);
 }
 
 /** 去掉消息里的所有图片块，仅保留文本（视觉降级）。 */
@@ -62,6 +66,49 @@ function stripImages(messages) {
       m.content = texts || '请仅根据上面的执行报告与文字信息给出修正脚本。';
     }
   }
+}
+
+/**
+ * 压缩历史，控制闭环 token 增长：
+ * 只保留最后一条 assistant 脚本与最后一条带图的 user 消息，其余替换为占位文本。
+ * 否则每轮都会把此前所有脚本 + 多张 PNG 重发，成本随轮次近似二次增长。
+ */
+function compactHistory(messages) {
+  let lastAssistant = -1;
+  let lastImageUser = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'assistant') lastAssistant = i;
+    if (m.role === 'user' && Array.isArray(m.content)
+      && m.content.some((p) => p?.type === 'image_url')) lastImageUser = i;
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'assistant' && i !== lastAssistant && typeof m.content === 'string') {
+      m.content = '（更早轮次的脚本已省略）';
+    }
+    if (Array.isArray(m.content) && i !== lastImageUser) {
+      m.content = m.content.map((p) => (p?.type === 'image_url'
+        ? { type: 'text', text: '（更早轮次的渲染图已省略）' } : p));
+    }
+  }
+}
+
+/** 平移 RGBA 数据（越界裁剪），用于动作帧的基线对齐。 */
+function shiftPixels(data, w, h, dx, dy) {
+  if (!dx && !dy) return data;
+  const out = new Uint8ClampedArray(data.length);
+  for (let y = 0; y < h; y++) {
+    const sy = y - dy; // 正 dy 表示把内容整体下移
+    if (sy < 0 || sy >= h) continue;
+    for (let x = 0; x < w; x++) {
+      const sx = x - dx; // 正 dx 表示把内容整体右移
+      if (sx < 0 || sx >= w) continue;
+      const si = (sy * w + sx) * 4, di = (y * w + x) * 4;
+      out[di] = data[si]; out[di + 1] = data[si + 1]; out[di + 2] = data[si + 2]; out[di + 3] = data[si + 3];
+    }
+  }
+  return out;
 }
 
 /** 把 PNG dataURL 解码为 PixelBuffer（仅浏览器环境可用）。 */
@@ -127,6 +174,20 @@ export class Agent {
     this.controller = null;
     this.iterations = [];
     this.running = false;
+    /** 累积的规范 PixelScript 源码（差分协议的基准，也是可复现的单一事实来源） */
+    this.script = '';
+    /** 画布标注（Point & Talk）：会烘焙进回灌图并附文字描述 */
+    this.annotations = opts.annotations || [];
+    /** 动作动画预设 id（v2.5） */
+    this.action = opts.action || 'none';
+  }
+
+  /** 标注的文字提示（无标注返回空串）。 */
+  annotationNote() {
+    const marks = normalizeMarks(this.annotations, this.doc.width, this.doc.height);
+    const text = describeAnnotations(marks);
+    if (!text) return '';
+    return `\n\n用户在画布上做了以下标注（回灌图上有对应的品红编号框）：\n${text}\n请优先完成这些标注所指示的修改，不要改动标注之外的区域。`;
   }
 
   emit(e) { try { this.onEvent(e); } catch { /* UI 错误不影响闭环 */ } }
@@ -482,11 +543,11 @@ export class Agent {
   /** 选区放大回灌图（只回灌目标区域，聚焦模型注意力）。 */
   regionDataURL() {
     const r = this.region;
-    if (!r) return this.renderer.visionDataURL(this.visionLongEdge);
+    if (!r) return this.renderer.visionDataURL(this.visionLongEdge, this.annotations);
     try {
       const url = cropDataURL(this.doc.composite(), r, this.visionLongEdge);
-      return url || this.renderer.visionDataURL(this.visionLongEdge);
-    } catch { return this.renderer.visionDataURL(this.visionLongEdge); }
+      return url || this.renderer.visionDataURL(this.visionLongEdge, this.annotations);
+    } catch { return this.renderer.visionDataURL(this.visionLongEdge, this.annotations); }
   }
 
   /** 选区预览缩略图。 */
@@ -504,11 +565,46 @@ export class Agent {
     try { return bufferDataURL(ref.buffer); } catch { return null; }
   }
 
-  /** 多帧生成时给每帧追加的动画上下文。 */
+  /** 多帧生成时给每帧追加的动画上下文（含动作预设的姿态约束）。 */
   _frameBrief(brief, f, total) {
-    if (total <= 1) return brief;
-    return `${brief}\n\n这是一个 ${total} 帧的循环动画。当前绘制第 ${f + 1}/${total} 帧。`
+    const a = getAction(this.action);
+    const actionNote = a.id !== 'none' ? `\n动作：${a.label}。${a.prompt}` : '';
+    if (total <= 1) return brief + actionNote;
+    const loopText = a.id !== 'none' && a.loop ? '循环动画' : '动画序列';
+    const phase = Math.round((f / Math.max(1, total - 1)) * 100);
+    return `${brief}${actionNote}\n\n这是一个 ${loopText}，共 ${total} 帧，当前第 ${f + 1}/${total} 帧（进度 ${phase}%）。`
       + '请基于上一帧，只修改与运动相关的部分，保持角色外形、构图、配色、光照与描边风格完全一致。';
+  }
+
+  /**
+   * 动作动画后处理：把生成帧的角色底部基线对齐到同一水平线，消除帧间抖动。
+   * 只平移不改内容，确定性。
+   */
+  _alignBaseline(startIndex, count) {
+    if (!this.animation || count < 2) return;
+    const frames = this.animation.frames;
+    const infos = [];
+    let target = -Infinity;
+    for (let k = 0; k < count; k++) {
+      const i = startIndex + k;
+      if (i < 0 || i >= frames.length) continue;
+      const buf = this.animation.frameBuffer(i);
+      const b = buf?.bounds();
+      if (!b) { infos.push({ i, bottom: null }); continue; }
+      infos.push({ i, bottom: b.y1 });
+      if (b.y1 > target) target = b.y1;
+    }
+    if (!Number.isFinite(target)) return;
+    for (const { i, bottom } of infos) {
+      if (bottom == null || bottom === target) continue;
+      const dy = target - bottom;
+      if (!dy) continue;
+      const f = frames[i];
+      f.layers = f.layers.map((l) => ({
+        ...l,
+        data: shiftPixels(l.data, f.width, f.height, 0, dy),
+      }));
+    }
   }
 
   /**
@@ -520,9 +616,11 @@ export class Agent {
     this.running = true;
     this.controller = new AbortController();
     this.iterations = [];
+    this.script = '';
     // v2.4：选区限定生成——只把选区内回灌/只允许改选区内像素
     this.region = opts.region ? clampRect(opts.region, this.doc.width, this.doc.height) : null;
     const total = Math.max(1, Math.min(64, this.frameCount | 0));
+    const startFrame = this.animation ? this.animation.current : 0;
 
     this.emit({ type: 'start', brief, maxIterations: this.maxIterations, frames: total, region: this.region });
 
@@ -536,7 +634,7 @@ export class Agent {
           if (!this.animation) break;
           this.animation.capture(this.doc);
           this.animation.duplicate(this.doc);
-          if (this.visionEnabled) prevImage = this.renderer.visionDataURL(this.visionLongEdge);
+          if (this.visionEnabled) prevImage = this.renderer.visionDataURL(this.visionLongEdge, this.annotations);
         }
         this.emit({ type: 'frame', frame: f, frameTotal: total });
 
@@ -548,12 +646,12 @@ export class Agent {
           messages.push({
             role: 'user',
             content: [
-              { type: 'text', text: frameBrief },
+              { type: 'text', text: frameBrief + this.annotationNote() },
               { type: 'image_url', image_url: { url: prevImage, detail: this.visionDetail } },
             ],
           });
         } else {
-          messages.push({ role: 'user', content: buildUserBrief(frameBrief, docInfo) });
+          messages.push({ role: 'user', content: buildUserBrief(frameBrief, docInfo) + this.annotationNote() });
         }
 
         /* ── 0. 可选：导演阶段（计划 → 画师，仅首帧） ── */
@@ -612,8 +710,11 @@ export class Agent {
           break;
         }
 
-        const script = extractScript(text);
-        if (!script) {
+        /* ── 1.5 解析脚本 / 差分 ── */
+        const diffBlock = extractDiffBlock(text);
+        const fullScript = extractScript(text);
+        if (!diffBlock && !fullScript) {
+          compactHistory(messages);
           messages.push({ role: 'assistant', content: text });
           messages.push({
             role: 'user',
@@ -623,14 +724,65 @@ export class Agent {
           i++;
           continue;
         }
+        const prevScript = this.script || '';
+        const isFirstScript = (i === 0 && f === 0) || !this.incremental;
+        let execSource = null;
+        let newScript = '';
+        let mode = 'replace';
+        let appliedDiff = null;
+        // 优先应用差分（相对当前规范脚本）
+        if (diffBlock && prevScript) {
+          const res = applyUnifiedDiff(prevScript, diffBlock);
+          if (res.ok) {
+            execSource = res.text;
+            newScript = res.text;
+            mode = 'replace';
+            appliedDiff = diffBlock;
+          } else {
+            this.emit({ type: 'error', message: `diff 应用失败（${res.error}），已回退整幅脚本`, fatal: false });
+          }
+        }
+        if (execSource == null && fullScript) {
+          if (isFirstScript) {
+            execSource = fullScript;
+            newScript = fullScript;
+            mode = 'replace';
+          } else {
+            // 增量：只执行新增指令，同时把它并入规范脚本
+            execSource = fullScript;
+            newScript = prevScript ? `${prevScript}\n${fullScript}` : fullScript;
+            mode = 'append';
+          }
+        }
+        if (execSource == null && diffBlock) {
+          // 差分失败且没有整幅脚本：把 + 行当作增量指令尽力执行
+          const plus = splitLines(diffBlock)
+            .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+            .map((l) => l.slice(1));
+          if (plus.length) {
+            execSource = plus.join('\n');
+            newScript = prevScript ? `${prevScript}\n${execSource}` : execSource;
+            mode = 'append';
+            this.emit({ type: 'error', message: 'diff 不可用，已按增量指令执行', fatal: false });
+          }
+        }
+        if (execSource == null) {
+          compactHistory(messages);
+          messages.push({ role: 'assistant', content: text });
+          messages.push({ role: 'user', content: '请输出完整的 ```pixelscript 代码块，或基于当前脚本输出 ```pixelscript-diff 差分块。' });
+          this.emit({ type: 'error', message: '脚本为空，已请求重试', fatal: false });
+          i++;
+          continue;
+        }
+        const scriptDiff = unifiedDiff(prevScript, newScript);
+        this.script = newScript;
 
         /* ── 2. 执行 ── */
         this.emit({ type: 'phase', phase: 'execute', index: i });
-        const mode = i === 0 || !this.incremental ? 'replace' : 'append';
         const before = this.history.capture();
         const bufBefore = this.doc.activeLayer.buffer.clone();
         this.history.begin(`AI 第 ${i + 1} 轮`);
-        const report = runScript(script, this.doc, { mode, seed: opts.seed, deferRender: true });
+        const report = runScript(execSource, this.doc, { mode, seed: opts.seed, deferRender: true });
         // 选区限定：把区域外的像素恢复为执行前内容
         if (this.region) this.maskOutsideRegion(bufBefore, report);
 
@@ -648,7 +800,7 @@ export class Agent {
           : this.renderer.export(112, true).dataURL;
         const vision = this.region
           ? this.regionDataURL()
-          : this.renderer.visionDataURL(this.visionLongEdge);
+          : this.renderer.visionDataURL(this.visionLongEdge, this.annotations);
         const ascii = report.changed > 0
           ? this.doc.activeLayer.buffer.toAscii(this.doc.palette, 32)
           : '';
@@ -659,7 +811,10 @@ export class Agent {
           frame: f,
           frameTotal: total,
           mode,
-          script,
+          script: execSource,
+          scriptDiff,
+          canonicalScript: newScript,
+          diff: appliedDiff,
           report,
           thumbnail,
           text,
@@ -674,13 +829,16 @@ export class Agent {
 
         /* ── 5. 回灌 / 修复 ── */
         if (report.errors.length) {
+          compactHistory(messages);
           messages.push({ role: 'assistant', content: text });
           messages.push({ role: 'user', content: buildRepair(report) });
           i++;
           continue;
         }
 
-        if (report.changed === 0 && i > 0 && !renderInfo) {
+        // 收敛只看本轮像素改动量：非像素风格的 renderInfo 恒为真，不能再作为条件，
+        // 否则永远跑满 maxIterations 并反复重渲染。
+        if (report.changed === 0 && i > 0) {
           this.emit({ type: 'phase', phase: 'converged', index: i });
           break;
         }
@@ -697,6 +855,7 @@ export class Agent {
           style: normalizeStyle(this.doc.style),
           hasImage: this.visionEnabled,
         });
+        compactHistory(messages);
         messages.push({ role: 'assistant', content: text });
         let critiqueContent = critiqueText;
         if (this.visionEnabled) {
@@ -719,6 +878,11 @@ export class Agent {
         messages.push({ role: 'user', content: critiqueContent });
         i++;
         }
+      }
+      // 动作动画：多帧生成结束后对齐角色基线，消除帧间抖动
+      const action = getAction(this.action);
+      if (total > 1 && action.id !== 'none' && action.align) {
+        this._alignBaseline(startFrame, total);
       }
     } catch (err) {
       if (err?.name === 'AbortError' || err?.code === 'ABORTED') {

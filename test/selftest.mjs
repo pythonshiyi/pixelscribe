@@ -22,6 +22,13 @@ import {
 import { PixelDocument, Layer } from '../public/js/core/document.js';
 import { History } from '../public/js/core/history.js';
 import { runScript, checkSyntax, extractScript, isDone, tokenize, COMMANDS, dslReference } from '../public/js/lang/compiler.js';
+import { unifiedDiff, applyUnifiedDiff, extractDiffBlock, splitLines } from '../public/js/lang/scriptdiff.js';
+import {
+  bakeAnnotations, describeAnnotations, normalizeMarks, clampMark, ANNOTATION_COLOR,
+} from '../public/js/core/annotations.js';
+import {
+  makeSeamless, tilePreview, offsetWrap, seamError, toTiledJSON,
+} from '../public/js/core/tileset.js';
 import { glyph, textWidth } from '../public/js/lang/font5x7.js';
 import { encodePNG, encodePNGScaled, toBase64, toDataURL } from '../public/js/io/png.js';
 import { demoScript, demoCritique, demoReply, DemoProvider } from '../public/js/ai/demo.js';
@@ -31,6 +38,8 @@ import {
 } from '../public/js/ai/provider.js';
 import { buildSystemPrompt, buildCritique, buildRepair, computeTiles, STYLE_GUIDE } from '../public/js/ai/prompts.js';
 import { Agent } from '../public/js/ai/agent.js';
+import { ACTIONS, getAction, ACTION_OPTIONS } from '../public/js/ai/actions.js';
+import { scoreArt, summarizeScores } from '../public/js/ai/quality.js';
 import { SAMPLES } from '../public/js/samples.js';
 import {
   surfaceNormals, applyRelief, applySpecular, applyBloom, blur as blurFn, applyTone,
@@ -451,6 +460,62 @@ describe('文档与历史', () => {
     h.restoreTo(snap);
     eq(d.activeLayer.buffer.get(1, 1).a, 0);
     eq(d.activeLayer.buffer.get(0, 0).a, 255);
+  });
+
+  it('历史记录覆盖标题 / 对称 / 调色板 / 图层组', () => {
+    const d = new PixelDocument(4, 4);
+    const h = new History(d);
+    h.begin('改标题'); d.title = '新标题'; assert(h.commit(), '标题变化应入栈');
+    h.begin('改对称'); d.symmetry = 'x'; assert(h.commit(), '对称变化应入栈');
+    h.begin('换色板'); d.palette = Palette.from('gameboy'); assert(h.commit(), '调色板变化应入栈');
+    h.begin('编组'); d.groupLayers([d.activeLayer.id], '组A'); assert(h.commit(), '组变化应入栈');
+    h.undo(); eq(d.groups.length, 0, '撤销应解散组');
+    h.undo(); eq(d.palette.label, 'PICO-8', '撤销应还原调色板');
+    h.undo(); eq(d.symmetry, 'off', '撤销应还原对称');
+    h.undo(); eq(d.title, '未命名', '撤销应还原标题');
+  });
+
+  it('撤销后调色板预设身份不丢失', () => {
+    const d = new PixelDocument(4, 4);
+    d.palette = Palette.from('gameboy');
+    const h = new History(d);
+    h.begin('画点');
+    d.activeLayer.buffer.set(0, 0, { r: 1, g: 2, b: 3, a: 255 });
+    d.invalidate();
+    assert(h.commit());
+    h.undo();
+    eq(d.palette.label, 'Game Boy', '预设身份应保留（而非降级为 Custom）');
+  });
+
+  it('合并图层把底层不透明度只烘焙一次', () => {
+    const d = new PixelDocument(2, 2);
+    d.activeLayer.buffer.clear({ r: 255, g: 0, b: 0, a: 255 });
+    d.activeLayer.opacity = 0.5;
+    const top = d.addLayer();
+    top.buffer.set(0, 0, { r: 0, g: 0, b: 255, a: 255 });
+    d.mergeDown();
+    eq(d.layers.length, 1);
+    eq(d.layers[0].opacity, 1, '合并后底层 opacity 应归 1');
+    const under = d.composite().get(1, 1);
+    assert(Math.abs(under.a - 128) <= 1, `底层半透明应恰好烘焙一次：${JSON.stringify(under)}`);
+    const over = d.composite().get(0, 0);
+    eq(over.b, 255);
+    eq(over.a, 255);
+  });
+
+  it('撤销栈受字节上限约束', () => {
+    const d = new PixelDocument(32, 32); // 每层 4KB
+    const h = new History(d, 1000, 12 * 1024);
+    for (let i = 0; i < 10; i++) {
+      h.begin(`#${i}`);
+      d.activeLayer.buffer.set(i, 0, { r: i, g: 0, b: 0, a: 255 });
+      d.invalidate();
+      h.commit();
+    }
+    let bytes = 0;
+    for (const e of h.undoStack) bytes += e.state.layers.reduce((n, l) => n + l.data.length, 0);
+    assert(bytes <= 12 * 1024, `撤销栈应受限，实际 ${bytes}`);
+    assert(h.undoStack.length < 10, '应淘汰部分历史');
   });
 });
 
@@ -1097,12 +1162,235 @@ describe('PNG 编码', () => {
     assert(url.startsWith('data:image/png;base64,iVBOR'), url.slice(0, 40));
   });
 
+  it('toDataURL 大图会缩小到长边上限（曾经无法缩小）', () => {
+    const big = new PixelBuffer(16, 8);
+    big.clear({ r: 1, g: 2, b: 3, a: 255 });
+    const png = Buffer.from(toDataURL(big.data, 16, 8, 8).split(',')[1], 'base64');
+    const dv = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    eq(dv.getUint32(16), 8, '宽应缩到 8');
+    eq(dv.getUint32(20), 4, '高应等比缩到 4');
+  });
+
   it('大画布（多次 stored block）不报错', () => {
     const bigBuf = new PixelBuffer(128, 128);
     bigBuf.clear({ r: 0, g: 128, b: 255, a: 255 });
     const out = encodePNG(bigBuf.data, 128, 128);
     assert(out.length > 65000, '应触发多块 DEFLATE');
     deepEq([...out.slice(-8, -4)], [...Buffer.from('IEND')]);
+  });
+});
+
+/* ═══════════════ 9.5 差分编辑 ═══════════════ */
+
+describe('PixelScript 差分编辑', () => {
+  const base = ['size 32 32', 'palette pico8', 'ellipse 16 20 11 8 c3 fill', 'outline c1'].join('\n');
+
+  it('unifiedDiff 只包含改动与上下文', () => {
+    const next = `${base}\ncircle 16 12 3 c7 fill`;
+    const d = unifiedDiff(base, next);
+    assert(d.includes('+circle 16 12 3 c7 fill'), '应含新增行');
+    assert(d.includes('@@'), '应含 hunk 头');
+    assert(!d.includes('-size 32 32'), '未改动行不应标为删除');
+  });
+
+  it('applyUnifiedDiff 往返可还原', () => {
+    const next = base.replace('outline c1', 'outline c0');
+    const d = unifiedDiff(base, next);
+    const r = applyUnifiedDiff(base, d);
+    eq(r.ok, true);
+    eq(r.text, next);
+  });
+
+  it('行号漂移时仍能容错匹配', () => {
+    // 实际上下文在第 3 行，但声称在第 5 行 → 应在附近搜索到
+    const d = '@@ -5,3 +5,4 @@\n ellipse 16 20 11 8 c3 fill\n+circle 1 1 2 c7 fill\n outline c1';
+    const r = applyUnifiedDiff(base, d);
+    eq(r.ok, true);
+    assert(r.text.includes('circle 1 1 2 c7 fill'));
+  });
+
+  it('无差异返回空串', () => {
+    eq(unifiedDiff(base, base), '');
+  });
+
+  it('extractDiffBlock 识别多种围栏', () => {
+    const d = unifiedDiff(base, `${base}\ncircle 1 1 2 c7 fill`);
+    eq(!!extractDiffBlock('x\n```pixelscript-diff\n' + d + '\n```'), true);
+    eq(!!extractDiffBlock('x\n```patch\n' + d + '\n```'), true);
+    eq(extractDiffBlock('```pixelscript\ncircle 1 1 2 c7 fill\n```'), null, '普通脚本不应被判为 diff');
+  });
+
+  it('上下文不匹配时安全失败（不破坏原文）', () => {
+    const r = applyUnifiedDiff(base, '@@ -1,2 +1,2 @@\n this line does not exist\n-replaced');
+    eq(r.ok, false);
+    eq(r.text, base);
+  });
+
+  it('splitLines 归一化 CRLF', () => {
+    deepEq(splitLines('a\r\nb\rc'), ['a', 'b', 'c']);
+  });
+});
+
+/* ═══════════════ 9.6 画布标注 ═══════════════ */
+
+describe('画布标注（Point & Talk）', () => {
+  it('clampMark 裁剪到画布内', () => {
+    const m = clampMark({ x: -5, y: 28, w: 40, h: 40 }, 32, 32);
+    eq(m.x, 0);
+    eq(m.y, 28);
+    assert(m.w <= 32 && m.h <= 32);
+    assert(m.x + m.w <= 32 && m.y + m.h <= 32);
+  });
+
+  it('normalizeMarks 丢弃空/越界标注', () => {
+    const list = normalizeMarks([
+      { x: 1, y: 1, w: 4, h: 4 },
+      { x: 1, y: 1, w: 0, h: 0 },
+      null,
+      { x: -10, y: -10, w: 50, h: 50 },
+    ], 32, 32);
+    eq(list.length, 2);
+  });
+
+  it('bakeAnnotations 写入品红边框与编号', () => {
+    const buf = new PixelBuffer(32, 32);
+    bakeAnnotations(buf, [{ x: 4, y: 4, w: 10, h: 8 }]);
+    deepEq(buf.get(4, 4), ANNOTATION_COLOR, '左上角应为标注色');
+    deepEq(buf.get(13, 4), ANNOTATION_COLOR, '右上角应为标注色');
+    deepEq(buf.get(0, 0), { r: 0, g: 0, b: 0, a: 0 }, '标注外不应被改动');
+  });
+
+  it('describeAnnotations 含坐标与说明', () => {
+    const t = describeAnnotations([{ x: 1, y: 2, w: 3, h: 4, label: '换成蓝色' }]);
+    assert(t.includes('x=1') && t.includes('y=2') && t.includes('w=3'), t);
+    assert(t.includes('换成蓝色'), t);
+  });
+});
+
+/* ═══════════════ 9.7 瓦片 / 无缝 ═══════════════ */
+
+describe('瓦片 / 无缝纹理', () => {
+  const noisy = (w = 16, h = 16) => {
+    const b = new PixelBuffer(w, h);
+    for (let i = 0; i < w * h; i++) {
+      b.u32[i] = pack({ r: (i * 37) % 256, g: (i * 91) % 256, b: (i * 13) % 256, a: 255 });
+    }
+    return b;
+  };
+
+  it('makeSeamless 使左右/上下边缘完全对齐', () => {
+    const b = noisy();
+    assert(seamError(b).max > 0, '随机图初始应有接缝');
+    const s = makeSeamless(b, 'both', 4);
+    eq(seamError(s).max, 0, `无缝化后应无接缝：${JSON.stringify(seamError(s))}`);
+    eq(s.width, 16);
+    eq(s.height, 16);
+  });
+
+  it('单轴无缝化只处理对应方向', () => {
+    const s = makeSeamless(noisy(), 'x', 4);
+    eq(seamError(s).x, 0, '左右应对齐');
+    assert(seamError(s).y > 0, '上下保持原样');
+  });
+
+  it('offsetWrap 保持尺寸并错位半幅', () => {
+    const b = new PixelBuffer(4, 4);
+    b.set(0, 0, { r: 255, g: 0, b: 0, a: 255 });
+    const o = offsetWrap(b);
+    eq(o.width, 4);
+    eq(o.get(2, 2).r, 255, '原点应错位到 (2,2)');
+  });
+
+  it('tilePreview 尺寸为 cols×rows 倍', () => {
+    const t = tilePreview(noisy(8, 8), 3, 2);
+    eq(t.width, 24);
+    eq(t.height, 16);
+  });
+
+  it('toTiledJSON 字段符合 Tiled 约定', () => {
+    const j = toTiledJSON({ name: 't', image: 's.png', imageWidth: 64, imageHeight: 32, tileWidth: 16, tileHeight: 16, columns: 4, count: 8 });
+    eq(j.type, 'tileset');
+    eq(j.tilecount, 8);
+    eq(j.columns, 4);
+    eq(j.tiles.length, 8);
+  });
+});
+
+/* ═══════════════ 9.8 动作动画 ═══════════════ */
+
+describe('动作动画预设', () => {
+  it('预设字段完整且 getAction 容错', () => {
+    for (const a of ACTIONS) {
+      assert(typeof a.label === 'string' && a.frames >= 1 && a.fps >= 1, `动作 ${a.id} 字段异常`);
+    }
+    eq(getAction('walk').id, 'walk');
+    eq(getAction('不存在').id, 'none', '未知动作回退 none');
+    assert(ACTION_OPTIONS.length === ACTIONS.length);
+  });
+
+  it('_frameBrief 注入动作约束与进度', () => {
+    const a = new Agent({ provider: {}, renderer: {}, doc: new PixelDocument(32, 32), action: 'walk' });
+    const txt = a._frameBrief('画一个骑士', 2, 6);
+    assert(txt.includes('行走'), '应含动作名');
+    assert(txt.includes('3/6'), '应含帧号');
+    assert(txt.includes('循环'), '行走应为循环');
+  });
+
+  it('_alignBaseline 把各帧底部对齐', () => {
+    const d = new PixelDocument(16, 16);
+    const anim = new Animation({ fps: 8 });
+    d.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+    for (let y = 0; y < 6; y++) d.activeLayer.buffer.set(2, y, { r: 0, g: 255, b: 0, a: 255 });
+    d.invalidate();
+    anim.capture(d, true);          // 第 0 帧：底部 y=5
+    anim.duplicate(d);              // 复制为第 1 帧
+    d.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+    for (let y = 3; y < 10; y++) d.activeLayer.buffer.set(2, y, { r: 0, g: 255, b: 0, a: 255 });
+    d.invalidate();
+    anim.capture(d);                // 第 1 帧：底部 y=9
+    eq(anim.length, 2);
+    const agent = new Agent({ provider: {}, renderer: {}, doc: d, animation: anim });
+    const before = [anim.frameBuffer(0).bounds().y1, anim.frameBuffer(1).bounds().y1];
+    assert(before[0] !== before[1], '初始底部应不同');
+    agent._alignBaseline(0, 2);
+    eq(anim.frameBuffer(0).bounds().y1, anim.frameBuffer(1).bounds().y1, '对齐后底部应一致');
+  });
+});
+
+/* ═══════════════ 9.9 作品质量评分 ═══════════════ */
+
+describe('作品质量启发式评分', () => {
+  it('空画布得 0 分', () => {
+    const b = new PixelBuffer(16, 16);
+    eq(scoreArt(b).score, 0);
+  });
+
+  it('合理构图得分较高，调色板符合度为 1', () => {
+    const b = new PixelBuffer(32, 32);
+    const pal = Palette.from('pico8');
+    // 用调色板颜色画一个居中的圆
+    b.fillRect(6, 6, 20, 20, pal.colors[3], false);
+    b.fillRect(10, 10, 12, 12, pal.colors[4], false);
+    const r = scoreArt(b, { palette: pal });
+    assert(r.score > 55, `得分偏低：${r.score}`);
+    eq(r.metrics.paletteAdherence, 1, '全部应落在调色板内');
+    assert(r.metrics.colorCount >= 2);
+  });
+
+  it('超出调色板会降低符合度', () => {
+    const b = new PixelBuffer(16, 16);
+    const pal = Palette.from('gameboy');
+    b.fillRect(2, 2, 10, 10, { r: 123, g: 45, b: 200, a: 255 }, false);
+    const r = scoreArt(b, { palette: pal });
+    eq(r.metrics.paletteAdherence, 0);
+  });
+
+  it('summarizeScores 计算均/极值', () => {
+    const s = summarizeScores([80, 90, 70]);
+    eq(s.count, 3);
+    eq(s.mean, 80);
+    eq(s.min, 70);
+    eq(s.max, 90);
   });
 });
 
@@ -1702,7 +1990,7 @@ function parseGIF(bytes) {
   const u16 = () => { const v = bytes[p] | (bytes[p + 1] << 8); p += 2; return v; };
   const sig = String.fromCharCode(...bytes.slice(0, 6)); p = 6;
   const w = u16(), h = u16(), packed = u8();
-  u8(); u8();
+  const bgIndex = u8(); u8();
   const gctSize = 1 << ((packed & 7) + 1);
   const gct = [];
   if (packed & 0x80) for (let i = 0; i < gctSize; i++) gct.push([bytes[p++], bytes[p++], bytes[p++]]);
@@ -1733,7 +2021,7 @@ function parseGIF(bytes) {
     }
     throw new Error(`unexpected GIF block 0x${b.toString(16)}`);
   }
-  return { sig, w, h, gct, frames };
+  return { sig, w, h, gct, bgIndex, frames };
 }
 
 describe('GIF 编码（LZW 对拍）', () => {
@@ -1783,6 +2071,14 @@ describe('GIF 编码（LZW 对拍）', () => {
     const tIdx = parsed.frames[0].gce.tIdx;
     const idx = lzwDecode(parsed.frames[0].minCode, parsed.frames[0].data);
     eq(idx[1], tIdx, '透明像素应为透明索引');
+  });
+
+  it('LSD 背景索引指向透明索引（disposal=2 才会清成透明）', () => {
+    const palette = Palette.from('pico8').colors;
+    const f = new Uint8ClampedArray(2 * 2 * 4);
+    for (let i = 0; i < 4; i++) { f[i * 4] = 255; f[i * 4 + 3] = 255; }
+    const parsed = parseGIF(encodeGIF([f], { width: 2, height: 2, palette }));
+    eq(parsed.bgIndex, parsed.frames[0].gce.tIdx, '背景索引应等于透明索引');
   });
 });
 
@@ -1843,6 +2139,17 @@ describe('动画帧模型（Animation）', () => {
     eq(d.activeLayer.buffer.get(0, 0).r, 255);
     a.select(d, 1);
     eq(d.activeLayer.buffer.get(0, 0).b, 255);
+  });
+
+  it('帧缩略图会缩小到大画布长边上限', () => {
+    const d = new PixelDocument(64, 32);
+    d.activeLayer.buffer.clear(red);
+    const a = new Animation();
+    a.capture(d, true);
+    const png = Buffer.from(a.thumbnailDataURL(0, 16).split(',')[1], 'base64');
+    const dv = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    eq(dv.getUint32(16), 16, '宽应缩到 16');
+    eq(dv.getUint32(20), 8, '高应缩到 8');
   });
 
   it('insertBlank / remove / move', () => {
@@ -2664,6 +2971,20 @@ describe('光流估计', () => {
     fillUnknown(flow, known, w, h, 8);
     const q = (3 * w + 3);
     assert(flow[q * 2] > 0, '未知区域应扩散到 5 附近');
+  });
+
+  it('大画布受工作量预算约束快速返回', () => {
+    const w = 128, h = 128;
+    const A = new Uint8ClampedArray(w * h * 4);
+    const B = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      A[i * 4] = (i * 7) % 255; A[i * 4 + 3] = 255;
+      B[i * 4] = (i * 7 + 40) % 255; B[i * 4 + 3] = 255;
+    }
+    const t0 = Date.now();
+    const flow = estimateFlow(A, B, w, h, { maxWork: 2e6 });
+    assert(Date.now() - t0 < 5000, '应受 maxWork 约束快速完成');
+    eq(flow.length, w * h * 2);
   });
 });
 

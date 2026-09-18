@@ -28,6 +28,8 @@ import { imageToPixels } from '../io/img2pixel.js';
 import { storeGet, storeSet } from '../io/store.js';
 import { SAMPLES } from '../samples.js';
 import { STYLE_PRESETS, applyStylePreset, serializeStylePreset, parseStylePreset } from '../core/presets.js';
+import { clampMark } from '../core/annotations.js';
+import { makeSeamless, tilePreview, offsetWrap, seamError, toTiledJSON } from '../core/tileset.js';
 
 const STORAGE_KEY = 'pixelscribe.doc.v1';
 const SETTINGS_KEY = 'pixelscribe.settings.v1';
@@ -39,8 +41,11 @@ export class App {
     this.settings = this.loadSettings();
     this.doc = new PixelDocument(32, 32);
     this.history = new History(this.doc, 120);
+    /** 画布标注（Point & Talk）v2.5 —— 与 renderer.annotations 共享同一数组引用 */
+    this.annotations = [];
     this.renderer = new Renderer($('#stageCanvas'));
     this.renderer.setDocument(this.doc);
+    this.renderer.annotations = this.annotations;
     this.tools = new Tools(this);
     this.chat = new ChatPanel(this);
     this.gallery = new Gallery(this);
@@ -57,6 +62,11 @@ export class App {
     this.selectedLayerIds = new Set([this.doc.activeLayer.id]);
     this.spaceDown = false;
     this._dirty = false;
+    this._pixelCountRaf = 0;
+    /** 帧对象 → 缩略图 dataURL 缓存（帧内容变化会替换对象，故按对象引用天然失效） */
+    this._frameThumbs = new WeakMap();
+    /** 文档版本号：每次编辑自增，用于让图层缩略图缓存整体失效 */
+    this.docGen = 0;
 
     /** 动画帧模型（v1.5） */
     this.animation = new Animation({ fps: 8 });
@@ -85,6 +95,7 @@ export class App {
     this.bindKeys();
     this.bindStageResize();
     this.bindFrameBar();
+    $('#btnAnnotClear')?.addEventListener('click', () => this.clearAnnotations());
 
     const restored = await this.restore();
     if (!restored) {
@@ -151,6 +162,7 @@ export class App {
 
   afterEdit(structural = false) {
     this.doc.invalidate();
+    this.docGen++;
     if (structural) {
       this.renderer.setDocument(this.doc);
       this.renderer.fit();
@@ -173,8 +185,34 @@ export class App {
 
   markDirty() {
     this._dirty = true;
-    const t = $('#stPixels');
-    if (t) t.textContent = `${this.doc.composite().opaqueCount()} 像素`;
+    // 不要在每次 pointermove 里做全图合成 + 逐像素统计：合并到下一帧再算一次。
+    if (this._pixelCountRaf) return;
+    this._pixelCountRaf = requestAnimationFrame(() => {
+      this._pixelCountRaf = 0;
+      const t = $('#stPixels');
+      if (t) t.textContent = `${this.doc.composite().opaqueCount()} 像素`;
+    });
+  }
+
+  /* ── 画布标注（Point & Talk，v2.5） ── */
+
+  /** 添加一个标注矩形（坐标会裁剪到画布内）。 */
+  addAnnotation(mark) {
+    const m = clampMark(mark, this.doc.width, this.doc.height);
+    if (m.w < 2 || m.h < 2) return null;
+    this.annotations.push(m);
+    toast(`已添加标注 #${this.annotations.length}（生成时 AI 会看到并修改该区域）`, 'ok', 1800);
+    this.requestRender();
+    return m;
+  }
+
+  /** 清空全部标注。 */
+  clearAnnotations() {
+    if (!this.annotations.length) return;
+    this.annotations.length = 0;
+    this.renderer.annotPreview = null;
+    this.requestRender();
+    toast('已清除标注', 'ok', 1200);
   }
 
   scratch() {
@@ -245,7 +283,11 @@ export class App {
   }
 
   onToolChange(t) {
-    $$('.tool[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
+    $$('.tool[data-tool]').forEach((b) => {
+      const on = b.dataset.tool === t;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
     this.updateStatus();
   }
 
@@ -600,6 +642,18 @@ export class App {
     this.syncFrames();
   }
 
+  /** 带缓存的帧缩略图（按帧对象引用缓存，避免每次重建列表都重新编码所有帧）。 */
+  frameThumb(i) {
+    const f = this.animation.frames[i];
+    if (!f) return '';
+    let url = this._frameThumbs.get(f);
+    if (url === undefined) {
+      url = this.animation.thumbnailDataURL(i, 40);
+      this._frameThumbs.set(f, url);
+    }
+    return url;
+  }
+
   syncFrames() {
     const list = $('#frameList');
     if (!list) return;
@@ -612,7 +666,7 @@ export class App {
         onclick: () => this.selectFrame(i),
         ondblclick: () => this.frameEasingDialog(i),
       }, [
-        el('img', { src: this.animation.thumbnailDataURL(i, 40), alt: `帧 ${i + 1}` }),
+        el('img', { src: this.frameThumb(i), alt: `帧 ${i + 1}` }),
         el('span', { class: 'fno', text: String(i + 1) }),
         this.animation.frames[i].locked
           ? el('span', { class: 'flock', text: '🔒', title: '已锁定：AI 生成/编辑不会改写此帧' })
@@ -724,7 +778,7 @@ export class App {
     if (!list) return;
     const btn = list.children[this.animation.current];
     const img = btn?.querySelector('img');
-    if (img) img.src = this.animation.thumbnailDataURL(this.animation.current, 40);
+    if (img) img.src = this.frameThumb(this.animation.current);
   }
 
   updateOnion() {
@@ -866,6 +920,7 @@ export class App {
 
   /** 预设管理：导出 / 导入 / 删除。 */
   managePresetsDialog() {
+    let closeModal = () => { $('#modalBackdrop').hidden = true; };
     const body = el('div', { class: 'sample-list' });
     const custom = this.settings.stylePresets || [];
     if (!custom.length) body.append(el('p', { class: 'hint', text: '还没有自定义预设。用「存为预设」创建。' }));
@@ -881,12 +936,12 @@ export class App {
             this.saveSettings();
             this.refreshPresetOptions();
             toast('已删除', 'ok', 1200);
-            $('#modalBackdrop').hidden = true;
+            closeModal();
           },
         }),
       ]));
     }
-    modal({
+    closeModal = modal({
       title: '管理风格预设',
       body,
       actions: [
@@ -1000,7 +1055,10 @@ export class App {
   bindTabs() {
     for (const tab of $$('#tabs .tab')) {
       tab.addEventListener('click', () => {
-        $$('#tabs .tab').forEach((t) => t.classList.toggle('on', t === tab));
+        $$('#tabs .tab').forEach((t) => {
+          t.classList.toggle('on', t === tab);
+          t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+        });
         $$('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === tab.dataset.tab));
       });
     }
@@ -1060,6 +1118,7 @@ export class App {
         case 'r': this.tools.setTool('rect'); break;
         case 'o': this.tools.setTool('circle'); break;
         case 'm': this.tools.setTool('select'); break;
+        case 'n': this.tools.setTool('annotate'); break;
         case 'x': this.swapColors(); break;
         case '0': this.renderer.fit(); this.requestRender(); this.updateStatus(); break;
         case 'delete': case 'backspace':
@@ -1087,6 +1146,14 @@ export class App {
     window.addEventListener('keyup', (e) => {
       if (e.code === 'Space') { this.spaceDown = false; $('#stage').classList.remove('panning'); }
     });
+    // 失焦（alt-tab 等）时 keyup 收不到，需主动复位，避免空格平移卡住。
+    const releaseSpace = () => {
+      this.spaceDown = false;
+      this.tools.panning = false;
+      $('#stage')?.classList.remove('panning');
+    };
+    window.addEventListener('blur', releaseSpace);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseSpace(); });
   }
 
   /* ── 文件 ── */
@@ -1119,6 +1186,7 @@ export class App {
             this.history.begin('新建画布');
             this.doc.resize(s, s);
             for (const l of this.doc.layers) l.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+            this.clearAnnotations();
             this.history.commit();
             this.afterEdit(true);
             toast(`已创建 ${s}×${s} 画布`, 'ok');
@@ -1184,9 +1252,10 @@ export class App {
           body,
           el('img', { src: dataURL, style: { maxWidth: '100%', maxHeight: '220px', imageRendering: 'pixelated', border: '1px solid var(--line)', borderRadius: '8px' } }),
         ]),
+        onClose: resolve,
         actions: [
-          { label: '取消', kind: 'ghost', onClick: resolve },
-          { label: '转换', kind: 'primary', onClick: () => { this._doPixelize(img); resolve(); } },
+          { label: '取消', kind: 'ghost' },
+          { label: '转换', kind: 'primary', onClick: () => { this._doPixelize(img); } },
         ],
       });
     });
@@ -1307,6 +1376,7 @@ export class App {
         { label: 'Aseprite', kind: 'ghost', onClick: () => this.exportAseprite() },
         { label: 'SVG', kind: 'ghost', onClick: () => this.exportSVG() },
         { label: 'WebM 动画', kind: 'ghost', onClick: () => this.exportWebM() },
+        { label: '瓦片/无缝…', kind: 'ghost', onClick: () => setTimeout(() => this.tilesetDialog(), 0) },
         {
           label: '导出 PNG',
           kind: 'primary',
@@ -1324,6 +1394,116 @@ export class App {
         },
       ],
     });
+  }
+
+  /** 瓦片 / 无缝纹理对话框：预览、无缝化、导出瓦片 PNG / Tiled JSON。 */
+  tilesetDialog() {
+    const makePreview = (mode) => {
+      const base = mode === 'offset' ? offsetWrap(this.doc.composite()) : tilePreview(this.doc.composite(), 3, 3);
+      return this.renderer.exportBufferDataURL(base, mode === 'offset' ? 256 : 320, true).dataURL;
+    };
+    const img = el('img', {
+      src: makePreview('tile'),
+      style: { width: '192px', height: '192px', imageRendering: 'pixelated', border: '1px solid var(--line)', borderRadius: '8px' },
+      alt: '平铺预览',
+    });
+    const errStat = el('div', { class: 'hint' });
+    const refreshErr = () => {
+      const e = seamError(this.doc.composite());
+      errStat.textContent = `接缝误差：左右 ${e.x} · 上下 ${e.y}（0 表示完全无缝）`;
+    };
+    refreshErr();
+
+    const body = el('div', {}, [
+      el('p', { text: '让画面成为可无缝平铺的纹理，并导出游戏引擎可用的瓦片资源。' }),
+      el('div', { class: 'grid2' }, [
+        el('label', { class: 'mini-field wide' }, [el('span', { text: '方向' }), el('select', { id: 'tsAxis' }, [
+          el('option', { value: 'both', text: '左右 + 上下' }),
+          el('option', { value: 'x', text: '仅左右' }),
+          el('option', { value: 'y', text: '仅上下' }),
+        ])]),
+        el('label', { class: 'mini-field wide' }, [el('span', { text: '过渡带宽' }), el('input', { type: 'number', id: 'tsBand', value: '4', min: '1', max: '32' })]),
+      ]),
+      el('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', marginTop: '8px' } }, [
+        img,
+        el('div', {}, [
+          el('label', { class: 'switch' }, [
+            el('input', { type: 'checkbox', id: 'tsOffset' }),
+            el('span', { text: '错位视图（看接缝）' }),
+          ]),
+          errStat,
+        ]),
+      ]),
+    ]);
+    setTimeout(() => {
+      const chk = $('#tsOffset');
+      if (chk) chk.addEventListener('change', () => { img.src = makePreview(chk.checked ? 'offset' : 'tile'); });
+    }, 0);
+
+    modal({
+      title: '瓦片 / 无缝',
+      body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        {
+          label: '无缝化边缘',
+          kind: 'primary',
+          close: false,
+          onClick: () => {
+            const axis = $('#tsAxis')?.value || 'both';
+            const band = Math.max(1, Number($('#tsBand')?.value) || 4);
+            this.history.begin('无缝化');
+            const l = this.doc.activeLayer;
+            l.buffer.data.set(makeSeamless(l.buffer, axis, band).data);
+            this.doc.invalidate();
+            this.history.commit();
+            this.afterEdit();
+            img.src = makePreview($('#tsOffset')?.checked ? 'offset' : 'tile');
+            refreshErr();
+            toast('已无缝化当前图层边缘', 'ok');
+          },
+        },
+        { label: '导出瓦片 PNG', kind: 'ghost', onClick: () => this.exportTilePNG() },
+        { label: '导出 Tiled JSON', kind: 'ghost', onClick: () => this.exportTiledJSON() },
+      ],
+    });
+  }
+
+  /** 导出当前画面为单张瓦片 PNG。 */
+  exportTilePNG() {
+    const { dataURL, width, height } = this.renderer.export(Math.max(this.doc.width, this.doc.height), false);
+    downloadDataURL(`${this.doc.title || 'pixelscribe'}_tile_${width}x${height}.png`, dataURL);
+    toast(`已导出瓦片 ${width}×${height}`, 'ok');
+  }
+
+  /** 导出 Tiled tileset JSON（多帧时以帧为瓦片，同时导出精灵表 PNG）。 */
+  exportTiledJSON() {
+    const name = this.doc.title || 'pixelscribe';
+    if (this.animation.length > 1) {
+      this.animation.capture(this.doc);
+      const ss = this.animation.toSpritesheet();
+      const png = encodePNG(ss.data, ss.width, ss.height);
+      const image = `${name}_sheet.png`;
+      downloadBytes(image, png, 'image/png');
+      const json = toTiledJSON({
+        name, image,
+        imageWidth: ss.width, imageHeight: ss.height,
+        tileWidth: ss.frameWidth, tileHeight: ss.frameHeight,
+        columns: ss.columns, count: ss.count,
+      });
+      downloadText(`${name}_tileset.json`, JSON.stringify(json, null, 2), 'application/json');
+      toast(`已导出 Tiled tileset（${ss.count} 瓦片）`, 'ok');
+      return;
+    }
+    const { dataURL, width, height } = this.renderer.export(Math.max(this.doc.width, this.doc.height), false);
+    const image = `${name}_tile.png`;
+    downloadDataURL(image, dataURL);
+    const json = toTiledJSON({
+      name, image, imageWidth: width, imageHeight: height,
+      tileWidth: this.doc.width, tileHeight: this.doc.height, columns: 1, count: 1,
+    });
+    downloadText(`${name}_tileset.json`, JSON.stringify(json, null, 2), 'application/json');
+    toast('已导出 Tiled tileset', 'ok');
   }
 
   exportSpriteSheet() {
@@ -1421,7 +1601,15 @@ export class App {
   settingsDialog() {
     const st = this.settings;
     const body = el('div', {}, [
-      el('p', { html: `服务端状态：<b>${this.config.demoMode ? '未配置 API Key（演示模式）' : '已就绪'}</b><br>默认端点 <code>${this.config.baseUrl || '—'}</code>，模型 <code>${this.config.model || '—'}</code>` }),
+      el('p', {}, [
+        '服务端状态：',
+        el('b', { text: this.config.demoMode ? '未配置 API Key（演示模式）' : '已就绪' }),
+        el('br'),
+        '默认端点 ',
+        el('code', { text: this.config.baseUrl || '—' }),
+        '，模型 ',
+        el('code', { text: this.config.model || '—' }),
+      ]),
       el('div', { class: 'field' }, [
         el('label', { text: '启用前端直连（Key 仅保存在本机 sessionStorage）' }),
         el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'setDirect', checked: st.directMode }), el('span', { text: '直连模式' })]),
@@ -1473,7 +1661,9 @@ export class App {
           label: '保存',
           kind: 'primary',
           onClick: () => {
+            // 合并写入：整体替换会丢掉 theme / stylePresets（自定义风格预设）等未在表单中的字段。
             this.settings = {
+              ...this.settings,
               directMode: $('#setDirect').checked,
               baseUrl: $('#setBase').value.trim() || 'https://api.openai.com/v1',
               model: $('#setModel').value.trim(),
@@ -1726,8 +1916,13 @@ export class App {
       audio: this.audio?.loaded || this.audio?.peaks ? this.audio.toJSON() : null,
     };
     const json = JSON.stringify(payload);
-    // 小文档同步写 localStorage（兼容旧路径、关页即存）；大文档/超配额则依赖 IndexedDB
-    try { localStorage.setItem(STORAGE_KEY, json); } catch { /* 超配额：交给 IndexedDB */ }
+    // 小文档同步写 localStorage（关页即存）；大文档只写 IndexedDB，
+    // 并清掉可能残留的旧 localStorage 值，避免 restore 读到过期数据。
+    if (json.length <= 1024 * 1024) {
+      try { localStorage.setItem(STORAGE_KEY, json); } catch { /* 超配额：交给 IndexedDB */ }
+    } else {
+      try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    }
     storeSet(STORAGE_KEY, json).catch(() => { /* 隐私模式等 */ });
     this._dirty = false;
   }
@@ -1741,6 +1936,8 @@ export class App {
       const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
       const doc = PixelDocument.fromJSON(payload.doc);
       this.doc = doc;
+      // 重建图层多选集合：否则仍指向已被替换掉的旧图层 id，多选/编组/删除全部失效。
+      this.selectedLayerIds = new Set([doc.activeLayer.id]);
       if (payload.animation) {
         try { this.animation = Animation.fromJSON(payload.animation); } catch { /* 忽略损坏的动画数据 */ }
         if (this.animation?.frames?.length) $('#frameFps') && ($('#frameFps').value = String(this.animation.fps));

@@ -58,7 +58,20 @@ export function recordWebM(opts) {
   return new Promise((resolve) => {
     let idx = 0;
     let timer = 0;
+    let settled = false;
     const total = frames.length;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearTimeout(safety);
+      try { for (const t of stream.getTracks()) t.stop(); } catch { /* ignore */ }
+    };
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
 
     const drawFrame = () => {
       const g = canvas.getContext('2d');
@@ -70,18 +83,24 @@ export function recordWebM(opts) {
 
     const stop = () => {
       clearTimeout(timer);
-      try { rec.stop(); } catch { /* 已停止 */ }
+      try { rec.stop(); } catch { finish(null); }
     };
 
     rec.onstop = () => {
       const blob = new win.Blob(chunks, { type: mimeType });
-      resolve({
+      finish({
         blob,
         mimeType,
         frames: total,
         durationMs: durations.reduce((s, d) => s + d, 0),
       });
     };
+    // MediaRecorder 出错时 onstop 可能永不触发——必须显式兜底，否则 Promise 永久挂起。
+    rec.onerror = () => finish(null);
+    const safety = setTimeout(
+      () => { try { rec.stop(); } catch { /* ignore */ } finish(null); },
+      opts.timeoutMs || (durations.reduce((s, d) => s + d, 0) + 15000),
+    );
 
     const step = () => {
       if (opts.signal?.aborted) { stop(); return; }
@@ -97,7 +116,7 @@ export function recordWebM(opts) {
       opts.audio?.audio?.play?.();
       step();
     } catch {
-      resolve(null);
+      finish(null);
     }
   });
 }

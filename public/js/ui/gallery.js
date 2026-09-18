@@ -36,10 +36,14 @@ export class Gallery {
       if (p) p.textContent = this.dir || '—';
       this.render();
     } catch (e) {
-      this.grid.replaceChildren(el('div', {
-        class: 'gallery-empty',
-        html: `作品库需要后端服务。<br>请用 <b>npm start</b> 打开页面（${e.message}）。`,
-      }));
+      // 用文本节点拼装，避免把错误信息当 HTML 注入（DOM XSS）。
+      const box = el('div', { class: 'gallery-empty' });
+      box.append('作品库需要后端服务。');
+      box.append(el('br'));
+      box.append('请用 ');
+      box.append(el('b', { text: 'npm start' }));
+      box.append(` 打开页面（${e.message}）。`);
+      this.grid.replaceChildren(box);
     }
   }
 
@@ -61,7 +65,7 @@ export class Gallery {
       : el('div', { class: 'gallery-file', text: '.pxs' }));
     box.append(el('div', { class: 'gallery-meta', text: it.name }));
     box.append(el('div', { class: 'gallery-actions' }, [
-      el('button', { class: 'btn small ghost', text: '查看', onclick: () => window.open(it.url, '_blank') }),
+      el('button', { class: 'btn small ghost', text: '查看', onclick: () => window.open(it.url, '_blank', 'noopener,noreferrer') }),
       el('button', { class: 'btn small ghost', text: '下载', onclick: () => this.download(it) }),
       el('button', { class: 'btn small ghost danger', text: '删', onclick: () => this.remove(it) }),
     ]));

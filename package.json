@@ -1,6 +1,6 @@
 {
   "name": "pixelscribe",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "description": "像素画笔 PixelScribe - 让多模态大模型通过 PixelScript DSL + 程序化/神经渲染 + 视觉闭环产出像素美术与写实渲染",
   "type": "module",
@@ -10,9 +10,12 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
-    "test": "node test/selftest.mjs && node test/dom-smoke.mjs",
+    "test": "node test/selftest.mjs && node test/dom-smoke.mjs && node test/server-smoke.mjs",
     "test:unit": "node test/selftest.mjs",
-    "test:dom": "node test/dom-smoke.mjs"
+    "test:dom": "node test/dom-smoke.mjs",
+    "test:server": "node test/server-smoke.mjs",
+    "bench": "node bench/quality-bench.mjs",
+    "bench:check": "node bench/quality-bench.mjs --check"
   },
   "keywords": [
     "pixel-art",
