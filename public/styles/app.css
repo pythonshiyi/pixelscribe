@@ -833,3 +833,12 @@ kbd {
 .layer-item.selected { outline: 1px solid color-mix(in srgb, var(--accent, #ff77a8) 70%, transparent); outline-offset: -1px; }
 #selBar { flex-wrap: wrap; }
 #selBar .tb:disabled { opacity: .35; cursor: default; }
+/* 帧拖拽与缓动标记（v2.2） */
+.frame-thumb { cursor: grab; }
+.frame-thumb.dragging { opacity: .4; }
+.frame-thumb.dragover { border-color: var(--accent-2); box-shadow: 0 0 0 2px var(--accent-2); }
+.frame-thumb .fease {
+  position: absolute; left: 2px; top: 1px; font-size: 10px; line-height: 1;
+  color: #ffe066; background: rgba(0, 0, 0, .45); border-radius: 3px; padding: 0 2px;
+}
+.audio-wave { cursor: crosshair; }

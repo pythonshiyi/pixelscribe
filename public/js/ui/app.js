@@ -15,6 +15,7 @@ import {
 } from '../core/selection.js';
 import { encodePNG } from '../io/png.js';
 import { encodeSVG } from '../io/svg.js';
+import { canRecordWebM, recordWebM } from '../io/recorder.js';
 import { PixelBuffer } from '../core/buffer.js';
 import { Tools } from './tools.js';
 import { ChatPanel } from './chat.js';
@@ -294,6 +295,27 @@ export class App {
       e.target.value = '';
     });
     $('#btnAudioAlign')?.addEventListener('click', () => this.alignToBeats());
+    const wave = $('#audioWave');
+    if (wave) {
+      wave.addEventListener('pointerdown', (e) => {
+        wave.setPointerCapture?.(e.pointerId);
+        this._scrubbing = true;
+        this.scrubAudio(e.clientX);
+      });
+      wave.addEventListener('pointermove', (e) => { if (this._scrubbing) this.scrubAudio(e.clientX); });
+      wave.addEventListener('pointerup', () => { this._scrubbing = false; });
+      wave.addEventListener('pointercancel', () => { this._scrubbing = false; });
+      wave.addEventListener('wheel', (e) => {
+        if (!this.audio?.peaks) return;
+        e.preventDefault();
+        this._waveZoom = Math.max(1, Math.min(16, (this._waveZoom || 1) * (e.deltaY < 0 ? 1.25 : 1 / 1.25)));
+        const r = wave.getBoundingClientRect();
+        this._waveCenter = (e.clientX - r.left) / r.width;
+        this._renderWave();
+        this.updateAudioPlayhead();
+        toast(`波形缩放 ${this._waveZoom.toFixed(1)}×`, '', 900);
+      }, { passive: false });
+    }
   }
 
   selectFrame(i) {
@@ -325,6 +347,7 @@ export class App {
         const t = this.audio.currentTime;
         if (t >= this.audio.duration - 0.01) { this.stopPlay(); return; }
         this.applyFrameIndex(this.positionToFrame(t * 1000));
+        this.updateAudioPlayhead();
         this._audioRAF = requestAnimationFrame(tick);
       };
       this._audioRAF = requestAnimationFrame(tick);
@@ -403,24 +426,71 @@ export class App {
     const g = c.getContext('2d');
     g.clearRect(0, 0, c.width, c.height);
     const peaks = this.audio?.peaks;
-    if (!peaks) { c.hidden = true; return; }
+    if (!peaks) { c.hidden = true; this.updateAudioPlayhead(); return; }
     c.hidden = false;
+    this._waveMeta = { canvas: c, g, peaks, duration: this.audio.duration || 1 };
+    this._renderWave();
+  }
+
+  _renderWave() {
+    const meta = this._waveMeta;
+    if (!meta) return;
+    const { canvas: c, g, peaks } = meta;
     const { min, max, buckets } = peaks;
     const w = c.width, h = c.height, mid = h / 2;
+    g.clearRect(0, 0, w, h);
+    const zoom = this._waveZoom || 1;
+    const center = this._waveCenter ?? 0.5;
+    // 可视窗口 [u0,u1]
+    const span = 1 / zoom;
+    const u0 = Math.max(0, Math.min(1 - span, center - span / 2));
+    const u1 = Math.min(1, u0 + span);
     g.fillStyle = '#54d1ff';
+    const b0 = Math.floor(u0 * buckets), b1 = Math.max(b0 + 1, Math.ceil(u1 * buckets));
     for (let x = 0; x < w; x++) {
-      const b = Math.min(buckets - 1, Math.floor((x / w) * buckets));
+      const u = u0 + (x / w) * (u1 - u0);
+      const b = Math.min(buckets - 1, Math.floor(u * buckets));
       const hi = max[b] || 0, lo = min[b] || 0;
       const y0 = mid - hi * mid * 0.92;
       const y1 = mid - lo * mid * 0.92;
       g.fillRect(x, Math.min(y0, y1), 1, Math.max(1, Math.abs(y1 - y0)));
     }
-    const dur = this.audio.duration || 1;
+    void b0; void b1;
     g.fillStyle = '#ff77a8';
     for (const bt of this.audio.beats || []) {
-      const x = Math.round((bt / dur) * (w - 1));
+      const u = bt / meta.duration;
+      if (u < u0 || u > u1) continue;
+      const x = Math.round(((u - u0) / (u1 - u0)) * (w - 1));
       g.fillRect(x, 0, 1, h);
     }
+  }
+
+  /** 播放头 / scrub 位置指示（v2.2）。 */
+  updateAudioPlayhead() {
+    const c = $('#audioWave');
+    if (!c || c.hidden) return;
+    const g = c.getContext('2d');
+    const dur = this.audio?.duration || 0;
+    const t = dur > 0 ? Math.min(1, this.audio.currentTime / dur) : 0;
+    g.save();
+    g.fillStyle = this.audio?.loaded ? '#ffe066' : 'rgba(255,224,102,0.5)';
+    const x = Math.round(t * (c.width - 1));
+    g.fillRect(x - 1, 0, 2, c.height);
+    g.restore();
+  }
+
+  /** 点击波形：scrub 到对应时间并切换帧（v2.2）。 */
+  scrubAudio(clientX) {
+    const c = $('#audioWave');
+    const dur = this.audio?.duration || 0;
+    if (!c || dur <= 0) return;
+    const r = c.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * dur;
+    try { if (this.audio._audio) this.audio._audio.currentTime = t; } catch { /* ignore */ }
+    this.applyFrameIndex(this.positionToFrame(t * 1000));
+    this._renderWave();
+    this.updateAudioPlayhead();
+    if (this.playing) this.audio?.play(t);
   }
 
   alignToBeats() {
@@ -533,18 +603,102 @@ export class App {
     for (let i = 0; i < this.animation.length; i++) {
       const btn = el('button', {
         class: `frame-thumb${i === this.animation.current ? ' on' : ''}`,
-        title: `第 ${i + 1} 帧`,
+        title: `第 ${i + 1} 帧（拖拽排序，双击设缓动）`,
+        draggable: 'true',
         onclick: () => this.selectFrame(i),
+        ondblclick: () => this.frameEasingDialog(i),
       }, [
         el('img', { src: this.animation.thumbnailDataURL(i, 40), alt: `帧 ${i + 1}` }),
         el('span', { class: 'fno', text: String(i + 1) }),
+        this.animation.frames[i].easing && this.animation.frames[i].easing !== 'linear'
+          ? el('span', { class: 'fease', text: '∿', title: `缓动：${easingLabel(this.animation.frames[i].easing)}` })
+          : null,
       ]);
+      this._bindFrameDrag(btn, i);
       list.append(btn);
     }
     const del = $('#btnFrameDel');
     if (del) del.disabled = this.animation.length <= 1;
     this.updateOnion();
     this.updateStatus();
+    this.updateAudioPlayhead();
+  }
+
+  /** 帧缩略图拖拽排序（v2.2）。 */
+  _bindFrameDrag(btn, index) {
+    btn.addEventListener('dragstart', (e) => {
+      this._dragFrame = index;
+      btn.classList.add('dragging');
+      e.dataTransfer?.setData('text/plain', String(index));
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    });
+    btn.addEventListener('dragend', () => {
+      this._dragFrame = null;
+      btn.classList.remove('dragging');
+      this.syncFrames();
+    });
+    btn.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      btn.classList.toggle('dragover', this._dragFrame != null && this._dragFrame !== index);
+    });
+    btn.addEventListener('dragleave', () => btn.classList.remove('dragover'));
+    btn.addEventListener('drop', (e) => {
+      e.preventDefault();
+      btn.classList.remove('dragover');
+      const from = this._dragFrame;
+      if (from == null || from === index) return;
+      this.animation.capture(this.doc);
+      this.animation.move(from, index);
+      this._dragFrame = null;
+      this.animation.applyTo(this.doc, this.animation.current);
+      this.renderer.setDocument(this.doc);
+      this.afterEdit(true);
+      this.syncFrames();
+      toast(`已把第 ${from + 1} 帧移到第 ${index + 1} 位`, 'ok', 1400);
+    });
+  }
+
+  /** 单帧缓动设置对话框（v2.2）。 */
+  frameEasingDialog(index = this.animation.current) {
+    const frame = this.animation.frames[index];
+    if (!frame) return;
+    const body = el('div', {}, [
+      el('p', { text: `设置第 ${index + 1} 帧的缓动曲线（用于该帧到下一帧的补间节奏）。` }),
+      el('label', { class: 'mini-field wide' }, [
+        el('span', { text: '缓动' }),
+        el('select', { id: 'feEasing' }, EASINGS.map((e) => el('option', { value: e.id, text: e.label }))),
+      ]),
+    ]);
+    setTimeout(() => { const s = $('#feEasing'); if (s) s.value = frame.easing || 'linear'; }, 0);
+    modal({
+      title: '帧缓动',
+      body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        {
+          label: '应用到全部帧',
+          kind: 'ghost',
+          onClick: () => {
+            const v = $('#feEasing')?.value || 'linear';
+            for (const f of this.animation.frames) f.easing = v;
+            this.markDirty();
+            this.syncFrames();
+            toast(`已把所有帧缓动设为「${easingLabel(v)}」`, 'ok');
+          },
+        },
+        {
+          label: '保存',
+          kind: 'primary',
+          onClick: () => {
+            frame.easing = $('#feEasing')?.value || 'linear';
+            this.markDirty();
+            this.syncFrames();
+            toast(`第 ${index + 1} 帧缓动：${easingLabel(frame.easing)}`, 'ok', 1600);
+          },
+        },
+      ],
+    });
   }
 
   updateFrameHighlight() {
@@ -1002,6 +1156,7 @@ export class App {
         { label: 'GIF', kind: 'ghost', onClick: () => this.exportGIF() },
         { label: 'Aseprite', kind: 'ghost', onClick: () => this.exportAseprite() },
         { label: 'SVG', kind: 'ghost', onClick: () => this.exportSVG() },
+        { label: 'WebM 动画', kind: 'ghost', onClick: () => this.exportWebM() },
         {
           label: '导出 PNG',
           kind: 'primary',
@@ -1061,6 +1216,56 @@ export class App {
     });
     downloadText(`${this.doc.title || 'pixelscribe'}.svg`, svg, 'image/svg+xml');
     toast(`已导出 SVG（${this.doc.width * scale}×${this.doc.height * scale} 矢量）`, 'ok');
+  }
+
+  /**
+   * 导出 WebM 动画（v2.2）：逐帧绘制到离屏 canvas 并用 MediaRecorder 录制，
+   * 若已载入音频则把音轨混入。浏览器不支持时给出提示。
+   */
+  async exportWebM() {
+    if (!canRecordWebM()) {
+      this.warn('当前环境不支持 WebM 录制（需要 MediaRecorder）');
+      return null;
+    }
+    this.animation.capture(this.doc);
+    const scale = Math.max(1, Math.round(384 / Math.max(this.doc.width, this.doc.height)));
+    const ow = this.doc.width * scale, oh = this.doc.height * scale;
+    const canvas = document.createElement('canvas');
+    canvas.width = ow;
+    canvas.height = oh;
+    const g = canvas.getContext('2d');
+    g.imageSmoothingEnabled = false;
+
+    // 预渲染每一帧为离屏 canvas
+    const frameCanvases = [];
+    for (let i = 0; i < this.animation.length; i++) {
+      const buf = this.animation.frameBuffer(i);
+      const c = document.createElement('canvas');
+      c.width = this.doc.width;
+      c.height = this.doc.height;
+      c.getContext('2d').putImageData(buf.toImageData(), 0, 0);
+      frameCanvases.push(c);
+    }
+
+    const durations = this.animation.frames.map((f) => f.duration || this.animation.frameDuration);
+    const wasPlaying = this.playing;
+    if (wasPlaying) this.stopPlay();
+
+    toast(`正在录制 ${this.animation.length} 帧…`, '', 1600);
+    const result = await recordWebM({
+      canvas,
+      frames: frameCanvases,
+      durations,
+      fps: this.animation.fps,
+      audio: this.audio?.loaded ? { audio: this.audio._audio } : null,
+      onProgress: (i, n) => this.chat?.setStatus?.(`录制 WebM ${i}/${n}…`, 'busy'),
+    }).catch(() => null);
+    this.chat?.setStatus?.('就绪', '');
+
+    if (!result) { this.warn('WebM 录制失败或不受支持'); return null; }
+    downloadBytes(`${this.doc.title || 'pixelscribe'}.webm`, await result.blob.arrayBuffer(), result.mimeType);
+    toast(`已导出 WebM（${result.frames} 帧 · ${(result.durationMs / 1000).toFixed(1)}s）`, 'ok');
+    return result;
   }
 
   settingsDialog() {

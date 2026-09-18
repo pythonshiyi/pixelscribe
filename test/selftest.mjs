@@ -60,6 +60,7 @@ import {
   clampRegion, extractRegion, clearRegion, pasteRegion, flipRegion, rotateRegion,
   scaleRegion, offsetRegion,
 } from '../public/js/core/selection.js';
+import { canRecordWebM, pickMimeType, recordWebM } from '../public/js/io/recorder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -2359,6 +2360,30 @@ describe('图层组', () => {
   });
 });
 
+/* ─────────── 12.22 WebM 录像（v2.2） ─────────── */
+
+describe('WebM 录像', () => {
+  it('无浏览器环境安全降级', () => {
+    eq(canRecordWebM(null), false);
+    eq(canRecordWebM({}), false);
+    eq(recordWebM({ win: null, canvas: null, frames: [] }) instanceof Promise, true, '应返回 Promise');
+  });
+
+  it('缺少 MediaRecorder 时不支持', () => {
+    eq(canRecordWebM({ HTMLCanvasElement: { prototype: { captureStream() {} } } }), false);
+  });
+
+  it('具备 MediaRecorder + captureStream 时可用', () => {
+    const win = {
+      MediaRecorder: function () {},
+      HTMLCanvasElement: { prototype: { captureStream() { return {}; } } },
+    };
+    win.MediaRecorder.isTypeSupported = () => true;
+    eq(canRecordWebM(win), true);
+    eq(pickMimeType(win), 'video/webm;codecs=vp9,opus');
+  });
+});
+
 /* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
 async function runIntegration() {
   const { default: http } = await import('node:http');
@@ -2771,6 +2796,70 @@ async function runIntegration() {
     eq(twAnim2.length, 4);
     assert(twAnim2.frames[1].tween, '应标记 tween');
   });
+
+  // 帧拖拽排序（Animation.move 语义）
+  group = '端到端 · 帧排序';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  {
+    const sortDoc = new Doc(8, 8);
+    const sortAnim = new Anim({ fps: 8 });
+    sortDoc.activeLayer.buffer.clear({ r: 10, g: 0, b: 0, a: 255 });
+    sortAnim.capture(sortDoc, true);
+    for (const v of [80, 160, 240]) {
+      sortAnim.duplicate(sortDoc);
+      sortDoc.activeLayer.buffer.clear({ r: v, g: 0, b: 0, a: 255 });
+      sortDoc.invalidate();
+      sortAnim.capture(sortDoc);
+    }
+    const first = sortAnim.frameBuffer(0).get(0, 0).r;
+    sortAnim.move(0, 3);
+    const movedTo3 = sortAnim.frameBuffer(3).get(0, 0).r;
+    check('move 把帧移到目标位置', () => {
+      eq(sortAnim.length, 4);
+      eq(movedTo3, first, '被移动帧应出现在目标索引');
+      eq(sortAnim.frameBuffer(0).get(0, 0).r, 80, '其余帧相对顺序保持');
+    });
+  }
+
+  // WebM 录像（Mock MediaRecorder）
+  group = '端到端 · WebM 录像';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  {
+    const { recordWebM: rec } = await import('../public/js/io/recorder.js');
+    const win = {
+      MediaRecorder: function () {
+        this.start = () => {
+          setTimeout(() => {
+            this.ondataavailable?.({ data: { size: 4, type: 'video/webm' } });
+            this.onstop?.();
+          }, 5);
+        };
+        this.stop = () => { /* 已在 start 内触发 */ };
+      },
+      HTMLCanvasElement: { prototype: { captureStream() { return { addTrack() {} }; } } },
+      Blob: class { constructor(parts, o) { this.parts = parts; this.type = o?.type; } },
+    };
+    win.MediaRecorder.isTypeSupported = () => true;
+    const fakeCanvas = {
+      width: 8, height: 8, captureStream: () => ({ addTrack() {} }),
+      getContext: () => ({ clearRect() {}, drawImage() {}, imageSmoothingEnabled: false }),
+    };
+    let recRes = null;
+    try {
+      recRes = await rec({
+        win,
+        canvas: fakeCanvas,
+        frames: [fakeCanvas, fakeCanvas],
+        durations: [10, 10],
+        onProgress: () => {},
+      });
+    } catch (err) { failures.push({ group, name: 'recordWebM', err }); }
+    check('recordWebM 录制流程产出 blob', () => {
+      assert(recRes && recRes.blob, '应产出 blob');
+      eq(recRes.frames, 2);
+      eq(recRes.durationMs, 20);
+    });
+  }
 
   await new Promise((r) => mock.close(r));
   await new Promise((r) => slow.close(r));

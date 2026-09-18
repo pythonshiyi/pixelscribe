@@ -742,6 +742,59 @@ ok('图层组编组与解散', () => {
   eq(app.doc.groups.length, 0, '解散后组应消失');
 });
 
+/* ─────────── 帧拖拽排序 / 缓动 / 音频 scrub（v2.2） ─────────── */
+
+ok('帧缩略图可拖拽且带缓动标记', () => {
+  while (app.animation.length < 3) app.animation.duplicate(app.doc);
+  app.animation.frames[0].easing = 'easeOutBounce';
+  app.syncFrames();
+  const thumbs = window.document.querySelectorAll('#frameList .frame-thumb');
+  eq(thumbs.length, app.animation.length);
+  eq(thumbs[0].getAttribute('draggable'), 'true', '应可拖拽');
+  assert(window.document.querySelector('#frameList .frame-thumb .fease'), '应显示缓动标记');
+});
+
+ok('拖拽排序（dragstart + drop）改变帧顺序', () => {
+  app.syncFrames();
+  const thumbs = window.document.querySelectorAll('#frameList .frame-thumb');
+  const from = 0, to = 2;
+  const before = app.animation.frames.map((f) => f.layers[0]?.data?.[0] ?? -1);
+  const dt = { setData() {}, effectAllowed: '' };
+  const ev = (type) => {
+    const e = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(e, 'dataTransfer', { value: dt });
+    return e;
+  };
+  thumbs[from].dispatchEvent(ev('dragstart'));
+  thumbs[to].dispatchEvent(ev('drop'));
+  const after = app.animation.frames.map((f) => f.layers[0]?.data?.[0] ?? -1);
+  assert(before[from] === after[to], '被拖拽帧应出现在目标位置');
+  assert(app.animation.length === before.length, '帧数不应变化');
+});
+
+ok('帧缓动对话框可打开并应用', () => {
+  app.frameEasingDialog(0);
+  assert($('#feEasing'), '缺少缓动下拉');
+  $('#feEasing').value = 'easeInOutCubic';
+  const save = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('保存'));
+  save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.frames[0].easing, 'easeInOutCubic');
+});
+
+ok('音频波形 pointerdown scrub 安全', () => {
+  const wave = $('#audioWave');
+  wave.hidden = false;
+  app.audio.duration = 2;
+  wave.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 5 }));
+  wave.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true }));
+  assert(true, 'scrub 不应抛异常');
+});
+
+ok('WebM 导出在 jsdom 下安全降级', async () => {
+  const r = await app.exportWebM();
+  eq(r, null, '无 MediaRecorder 应返回 null');
+});
+
 /* ─────────── AI 闭环（演示模式） ─────────── */
 
 console.log('\n\x1b[38;5;213m▸ AI 面板（演示模式）\x1b[0m');
