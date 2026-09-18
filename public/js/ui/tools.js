@@ -383,6 +383,21 @@ export class Tools {
     if (this.selectMode === 'moving') this.endSelect();
   }
 
+  /** 以浮动选区方式放入一块内容（粘贴用），可直接拖动后提交。 */
+  startFloating(content, x, y) {
+    const app = this.app;
+    this.commitFloating();
+    if (!content || !content.width || !content.height) return;
+    this.floating = { dx: 0, dy: 0, cut: content.clone() };
+    this.selOrigin = { x, y };
+    app.renderer.selection = { x, y, w: content.width, h: content.height };
+    this.selectMode = 'moving';
+    app.requestRender();
+    app.onSelectionChange?.();
+  }
+
+  get hasFloating() { return Boolean(this.floating) && this.selectMode === 'moving'; }
+
   deleteSelection() {
     const app = this.app;
     const sel = app.renderer.selection;

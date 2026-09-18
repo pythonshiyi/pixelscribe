@@ -821,3 +821,15 @@ kbd {
 .round-role.composer { background: #ffd166; color: #3a2b00; }
 .round-role.colorist { background: #7ef29d; color: #05300f; }
 .round-role.reviewer { background: #8fbcff; color: #041b3f; }
+/* 图层组与多选（v2.1） */
+.layer-selcount { font-size: 11px; color: var(--fg-2); }
+.layer-group {
+  display: flex; align-items: center; gap: 6px; padding: 3px 6px; margin-top: 2px;
+  background: color-mix(in srgb, var(--accent-2, #29adff) 12%, transparent);
+  border-left: 2px solid var(--accent-2, #29adff); border-radius: 4px;
+}
+.layer-group-toggle { background: none; border: none; color: var(--fg-1); cursor: pointer; font-size: 11px; padding: 0 2px; }
+.layer-group-name { flex: 1; font-size: 11px; font-weight: 600; color: var(--fg-0); cursor: pointer; }
+.layer-item.selected { outline: 1px solid color-mix(in srgb, var(--accent, #ff77a8) 70%, transparent); outline-offset: -1px; }
+#selBar { flex-wrap: wrap; }
+#selBar .tb:disabled { opacity: .35; cursor: default; }

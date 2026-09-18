@@ -10,6 +10,9 @@ import { Animation } from '../core/animation.js';
 import { insertTween } from '../core/tween.js';
 import { EASINGS, easingLabel } from '../core/easing.js';
 import { AudioTrack, frameDurationsForBeats } from '../core/audio.js';
+import {
+  clampRegion, extractRegion, clearRegion, flipRegion, rotateRegion, scaleRegion, offsetRegion,
+} from '../core/selection.js';
 import { encodePNG } from '../io/png.js';
 import { encodeSVG } from '../io/svg.js';
 import { PixelBuffer } from '../core/buffer.js';
@@ -46,6 +49,10 @@ export class App {
     this.primaryIndex = 0;
     this.secondary = { ...this.doc.palette.colors[7] };
     this.secondaryIndex = 7;
+    /** 选区剪贴板（PixelBuffer）v2.1 */
+    this.clipboard = null;
+    /** 多选图层 id 集合 v2.1 */
+    this.selectedLayerIds = new Set([this.doc.activeLayer.id]);
     this.spaceDown = false;
     this._dirty = false;
 
@@ -103,6 +110,7 @@ export class App {
     this.scriptPanel.syncGutter();
     this.requestRender();
     this.setAiBadge();
+    this.onSelectionChange();
 
     window.addEventListener('beforeunload', () => this.save());
     setInterval(() => this.save(), 30000);
@@ -659,6 +667,27 @@ export class App {
       this.applyLocalRender(this.renderer.selection, $('#aiBrief')?.value?.trim() || '');
     });
 
+    /* 选区工具栏（v2.1） */
+    const selActions = {
+      btnSelCopy: () => this.copySelection(),
+      btnSelCut: () => this.cutSelection(),
+      btnSelPaste: () => this.pasteClipboard(),
+      btnSelDup: () => this.duplicateSelection(),
+      btnSelFlipH: () => this.selectionOp('flip', { axis: 'x' }),
+      btnSelFlipV: () => this.selectionOp('flip', { axis: 'y' }),
+      btnSelRotL: () => this.selectionOp('rotate', { deg: -90 }),
+      btnSelRotR: () => this.selectionOp('rotate', { deg: 90 }),
+      btnSelScaleUp: () => this.selectionOp('scale', { fx: 2, fy: 2 }),
+      btnSelScaleDown: () => this.selectionOp('scale', { fx: 0.5, fy: 0.5 }),
+      btnSelDelete: () => this.deleteSelection(),
+    };
+    for (const [id, fn] of Object.entries(selActions)) {
+      $(`#${id}`)?.addEventListener('click', fn);
+      const b = $(`#${id}`);
+      if (b) b.disabled = true;
+    }
+    $('#btnSelPaste').disabled = true;
+
     for (const b of $$('.tool[data-tool]')) {
       b.addEventListener('click', () => this.tools.setTool(b.dataset.tool));
     }
@@ -693,6 +722,31 @@ export class App {
       if (ctrl && k === 's') { e.preventDefault(); this.exportDialog(); return; }
       if (ctrl && k === 'g') { e.preventDefault(); $('#btnGrid').click(); return; }
 
+      /* 选区编辑（v2.1） */
+      if (ctrl && k === 'c') { e.preventDefault(); this.copySelection(); return; }
+      if (ctrl && k === 'x') { e.preventDefault(); this.cutSelection(); return; }
+      if (ctrl && k === 'v') { e.preventDefault(); this.pasteClipboard(); return; }
+      if (ctrl && k === 'a') {
+        e.preventDefault();
+        this.renderer.selection = { x: 0, y: 0, w: this.doc.width, h: this.doc.height };
+        this.requestRender();
+        this.onSelectionChange();
+        return;
+      }
+      if (ctrl && k === 'j') { e.preventDefault(); this.duplicateSelection(); return; }
+      if (ctrl && k === 'd') { e.preventDefault(); this.deleteSelection(); return; }
+      if (ctrl && (k === '[' || k === ']')) {
+        e.preventDefault();
+        this.selectionOp('rotate', { deg: k === ']' ? 90 : -90 });
+        return;
+      }
+      if (ctrl && (k === 'h' || k === 'i' || k === 'u' || k === 'k' || k === 'l' || k === 'm')) {
+        // Ctrl+H 翻转水平 / Ctrl+K 翻转垂直 / Ctrl+I 缩放 + / Ctrl+U 缩放 - / Ctrl+L 旋转
+        const map = { h: ['flip', { axis: 'x' }], k: ['flip', { axis: 'y' }], i: ['scale', { fx: 2, fy: 2 }], u: ['scale', { fx: 0.5, fy: 0.5 }], l: ['rotate', { deg: 90 }], m: ['rotate', { deg: -90 }] };
+        const op = map[k];
+        if (op) { e.preventDefault(); this.selectionOp(op[0], op[1]); return; }
+      }
+
       switch (k) {
         case 'b': this.tools.setTool('pencil'); break;
         case 'e': this.tools.setTool('eraser'); break;
@@ -711,6 +765,15 @@ export class App {
         case 'escape': this.tools.clearSelection(); break;
         case '+': case '=': this.renderer.zoomAt(1.25); this.requestRender(); this.updateStatus(); break;
         case '-': this.renderer.zoomAt(1 / 1.25); this.requestRender(); this.updateStatus(); break;
+        case 'arrowleft': case 'arrowright': case 'arrowup': case 'arrowdown': {
+          const sel = this.renderer.selection;
+          if (!sel) break;
+          e.preventDefault();
+          const step = e.shiftKey ? 8 : 1;
+          const d = { arrowleft: [-step, 0], arrowright: [step, 0], arrowup: [0, -step], arrowdown: [0, step] }[k];
+          this.translateSelection(d[0], d[1]);
+          break;
+        }
         default:
           if (/^[1-8]$/.test(k)) this.setPrimaryIndex(Number(k) - 1);
           break;
@@ -1076,8 +1139,128 @@ export class App {
     });
   }
 
-  /* ── 脚本 ── */
+  /* ── 选区编辑（v2.1） ── */
 
+  get selection() { return this.renderer.selection; }
+
+  /** 选区变化时刷新工具栏按钮可用性。 */
+  onSelectionChange() {
+    const has = Boolean(this.renderer.selection);
+    for (const id of ['btnSelCopy', 'btnSelCut', 'btnSelDelete', 'btnSelFlipH', 'btnSelFlipV',
+      'btnSelRotL', 'btnSelRotR', 'btnSelScaleUp', 'btnSelScaleDown', 'btnSelDup']) {
+      const b = $(`#${id}`);
+      if (b) b.disabled = !has;
+    }
+    const p = $('#btnSelPaste');
+    if (p) p.disabled = !this.clipboard;
+  }
+
+  copySelection() {
+    const sel = this.renderer.selection;
+    if (!sel) { this.warn('请先用选区工具（M）框选区域'); return false; }
+    const tool = this.tools;
+    if (tool.hasFloating && tool.floating?.cut) {
+      this.clipboard = tool.floating.cut.clone();
+    } else {
+      this.clipboard = extractRegion(this.doc.activeLayer.buffer, sel);
+    }
+    this.onSelectionChange();
+    toast(`已复制 ${this.clipboard.width}×${this.clipboard.height} 选区`, 'ok', 1500);
+    return true;
+  }
+
+  cutSelection() {
+    if (!this.copySelection()) return false;
+    return this.deleteSelection();
+  }
+
+  deleteSelection() {
+    const sel = this.renderer.selection;
+    if (!sel) return false;
+    this.history.begin('删除选区');
+    clearRegion(this.doc.activeLayer.buffer, sel);
+    this.doc.invalidate();
+    this.history.commit();
+    this.afterEdit(true);
+    return true;
+  }
+
+  pasteClipboard() {
+    if (!this.clipboard) { this.warn('剪贴板为空'); return false; }
+    const x = Math.max(0, Math.min(this.doc.width - 1, Math.floor((this.doc.width - this.clipboard.width) / 2)));
+    const y = Math.max(0, Math.min(this.doc.height - 1, Math.floor((this.doc.height - this.clipboard.height) / 2)));
+    this.history.begin('粘贴');
+    const tool = this.tools;
+    tool.commitFloating?.();
+    tool.startFloating(this.clipboard, x, y);
+    this.history.commit();
+    this.afterEdit(true);
+    this.onSelectionChange();
+    toast('已粘贴为浮动选区，可拖动后按 Esc 提交', 'ok', 2200);
+    return true;
+  }
+
+  duplicateSelection() {
+    const sel = this.renderer.selection;
+    if (!sel) { this.warn('请先框选区域'); return false; }
+    this.history.begin('复制选区');
+    const tool = this.tools;
+    tool.commitFloating?.();
+    const content = extractRegion(this.doc.activeLayer.buffer, sel);
+    tool.startFloating(content, sel.x, sel.y);
+    this.history.commit();
+    this.afterEdit(true);
+    this.onSelectionChange();
+    return true;
+  }
+
+  /**
+   * 对选区做变换（翻转/旋转/缩放）。
+   * @param {'flip'|'rotate'|'scale'} op
+   */
+  selectionOp(op, opts = {}) {
+    let sel = this.renderer.selection;
+    if (!sel) { this.warn('请先框选区域（M）'); return null; }
+    const tool = this.tools;
+    if (tool.hasFloating) tool.commitFloating();
+    sel = this.renderer.selection;
+    const buf = this.doc.activeLayer.buffer;
+    const label = { flip: '翻转选区', rotate: '旋转选区', scale: '缩放选区' }[op] || '选区变换';
+    this.history.begin(label);
+    let next = clampRegion(sel, this.doc.width, this.doc.height);
+    if (op === 'flip') next = flipRegion(buf, sel, opts.axis || 'x');
+    else if (op === 'rotate') next = rotateRegion(buf, sel, opts.deg ?? 90);
+    else if (op === 'scale') next = scaleRegion(buf, sel, opts.fx ?? 2, opts.fy ?? opts.fx ?? 2);
+    this.doc.invalidate();
+    this.history.commit();
+    this.renderer.selection = next;
+    this.afterEdit(true);
+    this.onSelectionChange();
+    return next;
+  }
+
+  /** 平移选区内容（方向键 / Ctrl+J）。 */
+  translateSelection(dx = 0, dy = 0) {
+    const sel = this.renderer.selection;
+    if (!sel) return null;
+    const tool = this.tools;
+    if (tool.hasFloating) {
+      // 浮动选区：仅移动浮层位置，不立即写入像素
+      tool.floating.dx += dx;
+      tool.floating.dy += dy;
+      const np = tool.buildFloatingPreview();
+      if (np) this.renderer.overlay = np;
+      this.requestRender();
+      return tool.floating;
+    }
+    const next = offsetRegion(this.doc.activeLayer.buffer, sel, dx, dy);
+    this.doc.invalidate();
+    this.afterEdit(true);
+    this.onSelectionChange();
+    return next;
+  }
+
+  /* ── 脚本 ── */
   /** 载入并立即执行（用于导入 .pxs） */
   applyScript(code) {
     this.scriptPanel.setValue(code);

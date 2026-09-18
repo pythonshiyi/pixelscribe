@@ -46,6 +46,13 @@
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></symbol>
+  <symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 7.5L20 18M8 16.5L20 6"/></symbol>
+  <symbol id="i-clipboard" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.5h6V4"/><path d="M8 11h8M8 15h5"/></symbol>
+  <symbol id="i-fliph" viewBox="0 0 24 24"><path d="M12 3v18" stroke-dasharray="3 2"/><path d="M9 7L4 12l5 5z"/><path d="M15 7l5 5-5 5z"/></symbol>
+  <symbol id="i-flipv" viewBox="0 0 24 24"><path d="M3 12h18" stroke-dasharray="3 2"/><path d="M7 9L12 4l5 5z"/><path d="M7 15l5 5 5-5z"/></symbol>
+  <symbol id="i-rotl" viewBox="0 0 24 24"><path d="M4 12a8 8 0 118 8"/><path d="M4 8v4h4"/></symbol>
+  <symbol id="i-rotr" viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-8 8"/><path d="M20 8v4h-4"/></symbol>
+  <symbol id="i-group" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1"/><rect x="4" y="14" width="16" height="6" rx="1"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -80,6 +87,20 @@
   </div>
 
   <div class="topbar-spacer"></div>
+
+  <div class="topbar-group" id="selBar">
+    <button class="tb" id="btnSelCopy" title="复制选区 (Ctrl+C)"><svg><use href="#i-copy"/></svg></button>
+    <button class="tb" id="btnSelCut" title="剪切选区 (Ctrl+X)"><svg><use href="#i-scissors"/></svg></button>
+    <button class="tb" id="btnSelPaste" title="粘贴 (Ctrl+V)"><svg><use href="#i-clipboard"/></svg></button>
+    <button class="tb" id="btnSelDup" title="原地复制为浮动选区 (Ctrl+J)"><svg><use href="#i-layers"/></svg></button>
+    <button class="tb" id="btnSelFlipH" title="水平翻转 (Ctrl+H)"><svg><use href="#i-fliph"/></svg></button>
+    <button class="tb" id="btnSelFlipV" title="垂直翻转 (Ctrl+K)"><svg><use href="#i-flipv"/></svg></button>
+    <button class="tb" id="btnSelRotL" title="逆时针旋转 90°"><svg><use href="#i-rotl"/></svg></button>
+    <button class="tb" id="btnSelRotR" title="顺时针旋转 90° (Ctrl+])"><svg><use href="#i-rotr"/></svg></button>
+    <button class="tb" id="btnSelScaleUp" title="选区放大 2× (Ctrl+I)"><svg><use href="#i-zin"/></svg></button>
+    <button class="tb" id="btnSelScaleDown" title="选区缩小 1/2 (Ctrl+U)"><svg><use href="#i-zout"/></svg></button>
+    <button class="tb" id="btnSelDelete" title="删除选区内容 (Ctrl+D)"><svg><use href="#i-trash"/></svg></button>
+  </div>
 
   <div class="topbar-group">
     <button class="tb" id="btnNew" title="新建"><svg><use href="#i-plus"/></svg></button>
@@ -244,8 +265,10 @@ outline c1"></textarea>
       <div class="pane" data-pane="layers">
         <div class="pane-toolbar">
           <button class="btn small" id="btnAddLayer"><svg><use href="#i-plus"/></svg><span>新建</span></button>
+          <button class="btn small ghost" id="btnGroupLayer" title="把选中图层归入新组"><svg><use href="#i-group"/></svg><span>编组</span></button>
           <button class="btn small ghost" id="btnMergeLayer">向下合并</button>
           <div class="flex-spacer"></div>
+          <span class="layer-selcount" id="layerSelCount"></span>
           <button class="btn small ghost danger" id="btnDeleteLayer"><svg><use href="#i-trash"/></svg></button>
         </div>
         <div class="layer-list" id="layerList"></div>

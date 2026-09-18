@@ -56,6 +56,10 @@ import {
 } from '../public/js/core/audio.js';
 import { encodeSVG, svgDataURL } from '../public/js/io/svg.js';
 import { MultiAgent, ROLES } from '../public/js/ai/multiagent.js';
+import {
+  clampRegion, extractRegion, clearRegion, pasteRegion, flipRegion, rotateRegion,
+  scaleRegion, offsetRegion,
+} from '../public/js/core/selection.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -2246,6 +2250,112 @@ describe('SVG 写出器', () => {
   it('svgDataURL 返回 data URL', () => {
     const url = svgDataURL('<svg/>');
     assert(url.startsWith('data:image/svg+xml;base64,'), '应为 SVG dataURL');
+  });
+});
+
+/* ─────────── 12.20 选区区域运算（v2.1） ─────────── */
+
+describe('选区区域运算', () => {
+  const red = { r: 255, g: 0, b: 0, a: 255 };
+
+  it('clampRegion 裁剪越界', () => {
+    deepEq(clampRegion({ x: -5, y: -5, w: 20, h: 20 }, 10, 10), { x: 0, y: 0, w: 10, h: 10 });
+    deepEq(clampRegion({ x: 8, y: 8, w: 10, h: 10 }, 10, 10), { x: 8, y: 8, w: 2, h: 2 });
+    deepEq(clampRegion({ x: 20, y: 20, w: 5, h: 5 }, 10, 10), { x: 10, y: 10, w: 0, h: 0 });
+  });
+
+  it('extractRegion 复制内容', () => {
+    const b = new PixelBuffer(8, 8);
+    b.fillRect(1, 1, 3, 3, red, false);
+    const r = extractRegion(b, { x: 1, y: 1, w: 3, h: 3 });
+    eq(r.width, 3);
+    eq(r.get(0, 0).r, 255);
+    eq(r.get(2, 2).r, 255);
+  });
+
+  it('clearRegion 只清空目标区域', () => {
+    const b = new PixelBuffer(8, 8);
+    b.clear(red);
+    clearRegion(b, { x: 2, y: 2, w: 3, h: 3 });
+    eq(b.get(2, 2).a, 0);
+    eq(b.get(1, 1).a, 255, '区域外不应受影响');
+  });
+
+  it('pasteRegion 覆盖与混合', () => {
+    const b = new PixelBuffer(4, 4);
+    const src = new PixelBuffer(2, 2);
+    src.clear(red);
+    pasteRegion(b, src, 1, 1);
+    eq(b.get(1, 1).r, 255);
+    eq(b.get(0, 0).a, 0, '区域外为透明');
+  });
+
+  it('flipRegion 水平翻转', () => {
+    const b = new PixelBuffer(4, 1);
+    b.set(0, 0, red);
+    flipRegion(b, { x: 0, y: 0, w: 4, h: 1 }, 'x');
+    eq(b.get(0, 0).a, 0, '原位置应清空');
+    eq(b.get(3, 0).r, 255, '应翻到另一端');
+  });
+
+  it('rotateRegion 90° 交换宽高', () => {
+    const b = new PixelBuffer(4, 2);
+    b.fillRect(0, 0, 4, 2, red, false);
+    const r = rotateRegion(b, { x: 0, y: 0, w: 4, h: 2 }, 90);
+    eq(r.w, 2);
+    eq(r.h, 4);
+    eq(b.get(1, 1).r, 255, '旋转后仍覆盖');
+    eq(b.get(2, 0).a, 0, '旋转后超出原区域的部分应为空');
+  });
+
+  it('scaleRegion 最近邻整数放大', () => {
+    const b = new PixelBuffer(8, 8);
+    b.set(0, 0, red);
+    const r = scaleRegion(b, { x: 0, y: 0, w: 2, h: 2 }, 2, 2);
+    eq(r.w, 4);
+    eq(r.h, 4);
+    eq(b.get(0, 0).r, 255);
+    eq(b.get(1, 1).r, 255, '放大后应覆盖 2×2 块');
+  });
+
+  it('offsetRegion 平移内容', () => {
+    const b = new PixelBuffer(8, 8);
+    b.set(1, 1, red);
+    const r = offsetRegion(b, { x: 0, y: 0, w: 4, h: 4 }, 2, 1);
+    eq(r.x, 2);
+    eq(r.y, 1);
+    eq(b.get(1, 1).a, 0, '原位应清空');
+    eq(b.get(3, 2).r, 255, '内容应移动');
+  });
+});
+
+/* ─────────── 12.21 图层组（v2.1） ─────────── */
+
+describe('图层组', () => {
+  it('groupLayers / layersInGroup / removeGroup', () => {
+    const d = new PixelDocument(8, 8);
+    const a = d.addLayer('a');
+    const b = d.addLayer('b');
+    const g = d.groupLayers([a.id, b.id], '组一');
+    assert(g && g.id, '应创建组');
+    eq(d.layersInGroup(g.id).length, 2);
+    eq(a.group, g.id);
+    eq(d.getGroup(g.id).name, '组一');
+    d.removeGroup(g.id);
+    eq(a.group, null);
+    eq(d.groups.length, 0);
+  });
+
+  it('组可见性与 JSON 往返', () => {
+    const d = new PixelDocument(8, 8);
+    const a = d.addLayer('a');
+    const g = d.groupLayers([a.id], '组X');
+    g.collapsed = true;
+    const back = PixelDocument.fromJSON(JSON.parse(JSON.stringify(d.toJSON())));
+    eq(back.groups.length, 1);
+    eq(back.groups[0].name, '组X');
+    eq(back.groups[0].collapsed, true);
+    eq(back.layers.find((l) => l.name === 'a').group, g.id);
   });
 });
 

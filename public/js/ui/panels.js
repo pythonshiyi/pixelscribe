@@ -15,19 +15,23 @@ export function initLayers(app) {
   const opacity = $('#layerOpacity');
   const opacityVal = $('#layerOpacityVal');
   const locked = $('#layerLocked');
+  const collapsedGroups = new Set();
 
   $('#btnAddLayer').addEventListener('click', () => {
     app.history.begin('新建图层');
     app.doc.addLayer();
+    selectOnly(app.doc.activeLayer);
     app.history.commit();
     refresh();
     app.afterEdit();
   });
 
   $('#btnDeleteLayer').addEventListener('click', () => {
-    if (app.doc.layers.length <= 1) { toast('至少保留一个图层', 'warn'); return; }
+    const targets = selectedLayerIndices();
+    if (targets.length >= app.doc.layers.length) { toast('至少保留一个图层', 'warn'); return; }
     app.history.begin('删除图层');
-    app.doc.removeLayer();
+    for (const i of targets.sort((a, b) => b - a)) app.doc.removeLayer(i);
+    app.selectedLayerIds = new Set([app.doc.activeLayer.id]);
     app.history.commit();
     refresh();
     app.afterEdit();
@@ -41,10 +45,21 @@ export function initLayers(app) {
     app.afterEdit();
   });
 
+  $('#btnGroupLayer')?.addEventListener('click', () => {
+    const ids = [...app.selectedLayerIds];
+    if (!ids.length) { toast('请先选中图层', 'warn'); return; }
+    app.history.begin('编组');
+    const g = app.doc.groupLayers(ids);
+    app.history.commit();
+    refresh();
+    app.afterEdit();
+    if (g) toast(`已编组 ${ids.length} 个图层`, 'ok', 1600);
+  });
+
   opacity.addEventListener('input', () => {
     const v = Number(opacity.value) / 100;
     opacityVal.textContent = `${opacity.value}%`;
-    app.doc.activeLayer.opacity = v;
+    for (const l of selectedLayers()) l.opacity = v;
     app.doc.invalidate();
     app.requestRender();
     app.markDirty();
@@ -52,17 +67,34 @@ export function initLayers(app) {
   opacity.addEventListener('change', () => { refreshThumbs(); });
 
   locked.addEventListener('change', () => {
-    app.doc.activeLayer.locked = locked.checked;
+    for (const l of selectedLayers()) l.locked = locked.checked;
     refresh();
   });
 
+  function selectedLayers() {
+    const out = app.doc.layers.filter((l) => app.selectedLayerIds.has(l.id));
+    return out.length ? out : [app.doc.activeLayer];
+  }
+
+  function selectedLayerIndices() {
+    const ids = app.selectedLayerIds;
+    const idx = [];
+    app.doc.layers.forEach((l, i) => { if (ids.has(l.id)) idx.push(i); });
+    return idx.length ? idx : [app.doc.activeLayerIndex];
+  }
+
+  function selectOnly(layer) {
+    app.selectedLayerIds = new Set([layer.id]);
+  }
+
   function refreshThumbs() {
     const thumbs = $$('.layer-thumb', list);
-    [...app.doc.layers].reverse().forEach((l, i) => {
-      const t = thumbs[i];
-      if (!t) return;
-      t.src = thumbURL(l);
-    });
+    let k = 0;
+    for (let i = app.doc.layers.length - 1; i >= 0; i--) {
+      const t = thumbs[k];
+      k++;
+      if (t && t.tagName === 'IMG') t.src = thumbURL(app.doc.layers[i]);
+    }
   }
 
   function thumbURL(layer) {
@@ -75,12 +107,26 @@ export function initLayers(app) {
     return c.toDataURL();
   }
 
+  /** 图层 + 组头，按显示顺序（顶层在上）。 */
   function refresh() {
     list.replaceChildren();
-    const layers = [...app.doc.layers].reverse();
-    layers.forEach((layer, ri) => {
-      const index = app.doc.layers.length - 1 - ri;
-      const item = el('div', { class: `layer-item${index === app.doc.activeLayerIndex ? ' on' : ''}` }, [
+    const layers = app.doc.layers;
+    const shownGroups = new Set();
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i];
+      const groupId = layer.group;
+      const isGroupLast = groupId && (i === 0 || layers[i - 1].group !== groupId);
+      const isGroupFirstShown = groupId && !shownGroups.has(groupId);
+
+      if (isGroupFirstShown) shownGroups.add(groupId);
+      if (groupId && isGroupLast) {
+        const g = app.doc.getGroup(groupId);
+        list.append(buildGroupHeader(g, groupId));
+      }
+
+      const index = i;
+      const isSel = app.selectedLayerIds.has(layer.id);
+      const item = el('div', { class: `layer-item${index === app.doc.activeLayerIndex ? ' on' : ''}${isSel ? ' selected' : ''}` }, [
         el('button', {
           class: `layer-eye${layer.visible ? '' : ' off'}`,
           title: layer.visible ? '隐藏' : '显示',
@@ -99,8 +145,19 @@ export function initLayers(app) {
         el('span', { class: 'layer-meta', text: `${Math.round(layer.opacity * 100)}%` }),
       ]);
 
-      item.addEventListener('click', () => {
+      item.addEventListener('click', (e) => {
         app.doc.activeLayerIndex = index;
+        if (e.shiftKey && app._layerAnchor != null) {
+          const a = Math.min(app._layerAnchor, index), b = Math.max(app._layerAnchor, index);
+          app.selectedLayerIds = new Set(layers.slice(a, b + 1).map((l) => l.id));
+        } else if (e.ctrlKey || e.metaKey) {
+          if (app.selectedLayerIds.has(layer.id) && app.selectedLayerIds.size > 1) app.selectedLayerIds.delete(layer.id);
+          else app.selectedLayerIds.add(layer.id);
+          app._layerAnchor = index;
+        } else {
+          selectOnly(layer);
+          app._layerAnchor = index;
+        }
         refresh();
         app.updateStatus();
       });
@@ -108,7 +165,7 @@ export function initLayers(app) {
       nameEl.addEventListener('dblclick', () => {
         nameEl.contentEditable = 'true';
         nameEl.focus();
-        document.getSelection()?.selectAllChildren(nameEl);
+        document.getSelection()?.selectAllContents?.(nameEl);
       });
       nameEl.addEventListener('blur', () => {
         nameEl.contentEditable = 'false';
@@ -121,17 +178,86 @@ export function initLayers(app) {
       });
 
       list.append(item);
-    });
+    }
 
-    const al = app.doc.activeLayer;
+    const sel = selectedLayers();
+    const al = sel[0] || app.doc.activeLayer;
+    const sameOpacity = sel.every((l) => Math.abs(l.opacity - al.opacity) < 1e-6);
     opacity.value = String(Math.round(al.opacity * 100));
-    opacityVal.textContent = `${Math.round(al.opacity * 100)}%`;
-    locked.checked = al.locked;
-    $('#btnDeleteLayer').disabled = app.doc.layers.length <= 1;
+    opacityVal.textContent = sameOpacity ? `${Math.round(al.opacity * 100)}%` : '混合';
+    locked.checked = sel.every((l) => l.locked);
+    $('#btnDeleteLayer').disabled = selectedLayerIndices().length >= app.doc.layers.length;
     $('#btnMergeLayer').disabled = app.doc.activeLayerIndex === 0;
+    const cnt = $('#layerSelCount');
+    if (cnt) cnt.textContent = sel.length > 1 ? `已选 ${sel.length}` : '';
   }
 
-  return { refresh, refreshThumbs };
+  function buildGroupHeader(g, groupId) {
+    if (!g) return el('span');
+    const collapsed = g.collapsed || collapsedGroups.has(groupId);
+    const kids = app.doc.layersInGroup(groupId);
+    const anyVisible = kids.some((l) => l.visible);
+    return el('div', { class: `layer-group${collapsed ? ' collapsed' : ''}` }, [
+      el('button', {
+        class: 'layer-group-toggle',
+        title: collapsed ? '展开组' : '折叠组',
+        text: collapsed ? '▸' : '▾',
+        onclick: (e) => {
+          e.stopPropagation();
+          g.collapsed = !collapsed;
+          refresh();
+        },
+      }),
+      el('button', {
+        class: `layer-eye${anyVisible ? '' : ' off'}`,
+        title: anyVisible ? '隐藏组' : '显示组',
+        onclick: (e) => {
+          e.stopPropagation();
+          const next = !anyVisible;
+          for (const l of kids) l.visible = next;
+          app.doc.invalidate();
+          refresh();
+          app.requestRender();
+          app.markDirty();
+        },
+      }, [el('svg', {}, [el('use', { href: anyVisible ? '#i-eye' : '#i-eyeoff' })])]),
+      el('span', {
+        class: 'layer-group-name',
+        text: g.name,
+        title: '双击重命名，右键解散',
+        onclick: (e) => {
+          e.stopPropagation();
+          app.selectedLayerIds = new Set(kids.map((l) => l.id));
+          refresh();
+        },
+        oncontextmenu: (e) => {
+          e.preventDefault();
+          app.history.begin('解散图层组');
+          app.doc.removeGroup(groupId);
+          app.history.commit();
+          refresh();
+          app.afterEdit();
+          toast('已解散图层组', 'ok', 1400);
+        },
+        ondblclick: (e) => {
+          const t = e.currentTarget;
+          t.contentEditable = 'true';
+          t.focus();
+          document.getSelection()?.selectAllContents?.(t);
+        },
+        onblur: (e) => {
+          const t = e.currentTarget;
+          t.contentEditable = 'false';
+          g.name = t.textContent.trim() || g.name;
+          t.textContent = g.name;
+          app.markDirty();
+        },
+      }),
+      el('span', { class: 'layer-meta', text: `${kids.length} 层` }),
+    ]);
+  }
+
+  return { refresh, refreshThumbs, selectedLayers };
 }
 
 /* ══════════════════════ 色板 ══════════════════════ */

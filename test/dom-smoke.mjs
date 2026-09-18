@@ -683,6 +683,65 @@ ok('多智能体复选框存在', () => {
   assert($('#aiMulti'), '缺少多智能体开关');
 });
 
+/* ─────────── 选区编辑 / 图层组（v2.1） ─────────── */
+
+ok('选区工具栏存在且初始禁用', () => {
+  for (const id of ['btnSelCopy', 'btnSelPaste', 'btnSelFlipH', 'btnSelRotR', 'btnSelDelete']) {
+    assert($(`#${id}`), `缺少 #${id}`);
+    assert($(`#${id}`).disabled, `#${id} 初始应禁用`);
+  }
+});
+
+ok('设置选区后按钮可用，复制/粘贴/变换不抛异常', () => {
+  app.doc.resize(32, 32);
+  app.doc.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+  app.doc.activeLayer.buffer.fillRect(8, 8, 8, 8, { r: 255, g: 0, b: 0, a: 255 }, false);
+  app.doc.invalidate();
+  app.renderer.selection = { x: 8, y: 8, w: 8, h: 8 };
+  app.onSelectionChange();
+  eq($('#btnSelCopy').disabled, false, '有选区后复制应可用');
+  assert(app.copySelection(), '复制失败');
+  assert(app.clipboard && app.clipboard.opaqueCount() === 64, `剪贴板内容异常 ${app.clipboard && app.clipboard.opaqueCount()}`);
+  eq($('#btnSelPaste').disabled, false, '有剪贴板后粘贴应可用');
+  app.selectionOp('flip', { axis: 'x' });
+  app.selectionOp('rotate', { deg: 90 });
+  app.renderer.selection = { x: 8, y: 8, w: 8, h: 8 };
+  app.selectionOp('scale', { fx: 2, fy: 2 });
+  assert(app.doc.activeLayer.buffer.opaqueCount() > 0, '变换后应仍有内容');
+  app.pasteClipboard();
+  app.tools.commitFloating?.();
+});
+
+ok('方向键平移浮动选区 / Ctrl+A 全选', () => {
+  app.renderer.selection = null;
+  app.pasteClipboard();
+  const before = { ...app.renderer.selection };
+  app.translateSelection(2, 3);
+  const after = app.tools.floating;
+  assert(after && (after.dx !== 0 || after.dy !== 0), '浮动偏移未生效');
+  app.tools.commitFloating?.();
+  key('a', { ctrlKey: true });
+  assert(app.renderer.selection && app.renderer.selection.w === app.doc.width, 'Ctrl+A 应全选');
+});
+
+ok('图层组编组与解散', () => {
+  const n0 = app.doc.layers.length;
+  while (app.doc.layers.length < n0 + 2) app.doc.addLayer();
+  app.refreshLayers();
+  const a = app.doc.layers[app.doc.layers.length - 1];
+  const b = app.doc.layers[app.doc.layers.length - 2];
+  app.selectedLayerIds = new Set([a.id, b.id]);
+  $('#btnGroupLayer').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.doc.groups.length, 1, '应创建一个组');
+  assert(window.document.querySelector('#layerList .layer-group'), '应渲染组头');
+  assert(window.document.querySelector('#layerList .layer-item.selected'), '应渲染多选高亮');
+  eq($('#layerSelCount').textContent.includes('已选'), true, '应显示已选数量');
+  const g = app.doc.groups[0];
+  app.doc.removeGroup(g.id);
+  app.layersPanel.refresh();
+  eq(app.doc.groups.length, 0, '解散后组应消失');
+});
+
 /* ─────────── AI 闭环（演示模式） ─────────── */
 
 console.log('\n\x1b[38;5;213m▸ AI 面板（演示模式）\x1b[0m');

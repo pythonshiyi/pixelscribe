@@ -28,6 +28,8 @@ export class Layer {
     this.kind = 'raster';
     /** @type {null|{backend?:string, prompt?:string, strength?:number, style?:string, seed?:number}} */
     this.meta = null;
+    /** 所属图层组 id（null 表示顶层）v2.1 */
+    this.group = null;
   }
 
   clone() {
@@ -40,6 +42,7 @@ export class Layer {
     l.locked = this.locked;
     l.kind = this.kind;
     l.meta = this.meta ? { ...this.meta } : null;
+    l.group = this.group;
     return l;
   }
 }
@@ -63,9 +66,43 @@ export class PixelDocument {
     this.renderRequested = null;
     /** 本轮的局部重绘请求（由 DSL inpaint 追加，Agent 消费后清空） */
     this.inpaintRequests = [];
+    /** 图层组（扁平分组元数据）：{id,name,collapsed} v2.1 */
+    this.groups = [];
     this._composite = null;
     this._compositeBase = null;
   }
+
+  /* ── 图层组（v2.1） ── */
+
+  /** 新建图层组 @returns {{id:string,name:string,collapsed:boolean}} */
+  addGroup(name = '图层组') {
+    const g = { id: `G${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name, collapsed: false };
+    this.groups.push(g);
+    return g;
+  }
+
+  /** 把若干图层归入一个新组；返回该组。 */
+  groupLayers(layerIds, name) {
+    const ids = new Set(layerIds || []);
+    if (!ids.size) return null;
+    const g = this.addGroup(name || `图层组 ${this.groups.length + 1}`);
+    for (const l of this.layers) if (ids.has(l.id)) l.group = g.id;
+    return g;
+  }
+
+  /** 解散组并移除组记录。 */
+  removeGroup(id) {
+    this.groups = this.groups.filter((g) => g.id !== id);
+    for (const l of this.layers) if (l.group === id) l.group = null;
+  }
+
+  /** 组内图层（按绘制顺序）。 */
+  layersInGroup(id) { return this.layers.filter((l) => l.group === id); }
+
+  getGroup(id) { return this.groups.find((g) => g.id === id) || null; }
+
+  /** 组的有效可见性（组内任一图层可见）。 */
+  groupVisible(id) { return this.layersInGroup(id).some((l) => l.visible); }
 
   get activeLayer() { return this.layers[this.activeLayerIndex]; }
 
@@ -220,6 +257,7 @@ export class PixelDocument {
       seed: this.seed,
       style: this.style,
       lights: this.lights,
+      groups: this.groups.map((g) => ({ id: g.id, name: g.name, collapsed: Boolean(g.collapsed) })),
       palette: this.palette.toJSON(),
       layers: this.layers.map((l) => ({
         name: l.name,
@@ -227,6 +265,7 @@ export class PixelDocument {
         opacity: l.opacity,
         kind: l.kind,
         meta: l.meta,
+        group: l.group || null,
         data: bytesToHex(l.buffer.data),
       })),
     };
@@ -240,6 +279,9 @@ export class PixelDocument {
     doc.seed = json.seed ?? null;
     doc.style = json.style ?? 'pixel';
     doc.lights = Array.isArray(json.lights) ? json.lights : [];
+    doc.groups = Array.isArray(json.groups)
+      ? json.groups.map((g) => ({ id: g.id, name: g.name || '图层组', collapsed: Boolean(g.collapsed) }))
+      : [];
     doc.palette = Palette.from(json.palette?.hex ?? 'pico8');
     doc.layers = (json.layers ?? []).map((lj) => {
       const l = new Layer(json.width, json.height, lj.name);
@@ -247,6 +289,7 @@ export class PixelDocument {
       l.opacity = lj.opacity ?? 1;
       if (lj.kind === 'neural') l.kind = 'neural';
       if (lj.meta) l.meta = lj.meta;
+      if (lj.group) l.group = lj.group;
       const hex = lj.data ?? '';
       for (let i = 0; i < l.buffer.data.length && i * 2 < hex.length; i++) {
         l.buffer.data[i] = parseInt(hex.substr(i * 2, 2), 16);
