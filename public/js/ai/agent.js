@@ -31,6 +31,7 @@ import {
 import { PixelBuffer } from '../core/buffer.js';
 import { PixelDocument, Layer } from '../core/document.js';
 import { blendFrames, blendBuffers } from '../core/tween.js';
+import { morphBuffers, estimateFlow } from '../core/flow.js';
 import { ease } from '../core/easing.js';
 
 /** AI 补间的系统提示词。 */
@@ -335,9 +336,10 @@ export class Agent {
 
   /**
    * AI 补间：在动画的 from 帧与 to 帧之间插入 steps 张中间帧。
-   * 有可用模型时逐帧请求更合理的运动姿态，失败自动回退到交叉溶解。
-   * @param {{from?:number,to?:number,steps?:number,easing?:string,brief?:string,useAI?:boolean}} [opts]
-   * @returns {Promise<{inserted:number, at:number, easing:string}>}
+   * 有可用模型时逐帧请求更合理的运动姿态，失败自动回退到程序化补间。
+   * @param {{from?:number,to?:number,steps?:number,easing?:string,brief?:string,useAI?:boolean,
+   *          method?:'blend'|'morph'}} [opts]
+   * @returns {Promise<{inserted:number, at:number, easing:string, method:string}>}
    */
   async tween(opts = {}) {
     if (!this.animation) throw new Error('缺少动画模型，无法补间');
@@ -354,33 +356,72 @@ export class Agent {
       if (to === from) to = Math.min(len - 1, from + 1);
       const steps = Math.max(1, Math.min(64, opts.steps ?? 2));
       const easing = opts.easing || 'easeInOutQuad';
+      const method = opts.method === 'morph' ? 'morph' : 'blend';
       const useAI = opts.useAI !== false && Boolean(this.provider?.chat);
       const frameA = this.animation.frames[from];
       const frameB = this.animation.frames[to];
-      if (!frameA || !frameB) return { inserted: 0, at: from + 1, easing };
+      if (!frameA || !frameB) return { inserted: 0, at: from + 1, easing, method };
 
-      this.emit({ type: 'phase', phase: 'tween', index: from });
+      // 形变补间：预计算一次光流，供所有中间帧共用
+      let flow = null;
+      let ca = null, cb = null;
+      if (method === 'morph' && !useAI) {
+        ca = this.frameToDoc(frameA).composite();
+        cb = this.frameToDoc(frameB).composite();
+        this.emit({ type: 'phase', phase: 'flow', index: from });
+        flow = estimateFlow(ca.data, cb.data, ca.width, ca.height);
+      }
+
+      this.emit({ type: 'phase', phase: 'tween', index: from, method });
       const generated = [];
       for (let i = 1; i <= steps; i++) {
         if (this.controller.signal.aborted) break;
         const t = ease(easing, i / (steps + 1));
         let frame = null;
         if (useAI) frame = await this._aiIntermediateFrame(frameA, frameB, t, opts.brief).catch(() => null);
-        if (!frame) frame = blendFrames(frameA, frameB, t);
+        if (!frame) {
+          if (method === 'morph' && flow) frame = this._morphFrame(frameA, frameB, ca, cb, flow, t);
+          else frame = blendFrames(frameA, frameB, t);
+        }
         frame.easing = easing;
         generated.push(frame);
-        this.emit({ type: 'tween', step: i, steps, t, eased: t });
+        this.emit({ type: 'tween', step: i, steps, t, eased: t, method });
       }
       if (generated.length) {
         this.animation.frames.splice(from + 1, 0, ...generated);
         this.animation.current = from + 1;
       }
-      const result = { inserted: generated.length, at: from + 1, easing };
+      const result = { inserted: generated.length, at: from + 1, easing, method };
       this.emit({ type: 'tween', done: true, ...result });
       return result;
     } finally {
       if (ownRun) this.running = false;
     }
+  }
+
+  /** 用光流形变生成一帧（保持 frameA 的图层结构）。 */
+  _morphFrame(frameA, frameB, ca, cb, flow, t) {
+    const morphed = morphBuffers(ca, cb, t, flow);
+    return {
+      width: frameA.width,
+      height: frameA.height,
+      duration: frameA.duration,
+      easing: frameA.easing || 'linear',
+      tween: true,
+      method: 'morph',
+      t,
+      layers: frameA.layers.map((l, i) => ({
+        id: l.id,
+        name: l.name,
+        kind: l.kind || 'raster',
+        meta: l.meta ? { ...l.meta } : null,
+        visible: l.visible,
+        opacity: l.opacity,
+        locked: l.locked,
+        // 形变写在首个栅格层上，其余层保持 A 的内容
+        data: new Uint8ClampedArray(i === 0 ? morphed.data : (frameB.layers[i] ? frameB.layers[i].data : l.data)),
+      })),
+    };
   }
 
   /** 编排：先处理局部重绘请求，再按风格做整幅渲染。 */
@@ -415,9 +456,50 @@ export class Agent {
     return result;
   }
 
+  /* ── v2.4：选区限定生成 ───────────────────────────────────── */
+
+  /** 把选区域外的像素恢复为 bufBefore（保证「只改选区内」）。 */
+  maskOutsideRegion(bufBefore, report) {
+    const r = this.region;
+    if (!r) return;
+    const buf = this.doc.activeLayer.buffer;
+    let changed = 0;
+    for (let y = 0; y < buf.height; y++) {
+      for (let x = 0; x < buf.width; x++) {
+        if (x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h) continue;
+        const cur = buf.getPacked(x, y);
+        const old = bufBefore.getPacked(x, y);
+        if (cur !== old) { buf.setPacked(x, y, old); changed++; }
+      }
+    }
+    if (report) {
+      report.changed = Math.max(0, (report.changed || 0) - changed);
+      report.warnings = report.warnings || [];
+    }
+    this.doc.invalidate();
+  }
+
+  /** 选区放大回灌图（只回灌目标区域，聚焦模型注意力）。 */
+  regionDataURL() {
+    const r = this.region;
+    if (!r) return this.renderer.visionDataURL(this.visionLongEdge);
+    try {
+      const url = cropDataURL(this.doc.composite(), r, this.visionLongEdge);
+      return url || this.renderer.visionDataURL(this.visionLongEdge);
+    } catch { return this.renderer.visionDataURL(this.visionLongEdge); }
+  }
+
+  /** 选区预览缩略图。 */
+  regionThumbnail() {
+    const r = this.region;
+    if (!r) return this.renderer.export(112, true).dataURL;
+    try {
+      return cropDataURL(this.doc.composite(), r, 112) || this.renderer.export(112, true).dataURL;
+    } catch { return this.renderer.export(112, true).dataURL; }
+  }
+
   /** 参考图（kind='reference' 图层）的 dataURL，供神经后端作为引导。 */
-  referenceDataURL() {
-    const ref = this.doc.layers.find((l) => l.kind === 'reference');
+  referenceDataURL() {    const ref = this.doc.layers.find((l) => l.kind === 'reference');
     if (!ref) return null;
     try { return bufferDataURL(ref.buffer); } catch { return null; }
   }
@@ -438,9 +520,11 @@ export class Agent {
     this.running = true;
     this.controller = new AbortController();
     this.iterations = [];
+    // v2.4：选区限定生成——只把选区内回灌/只允许改选区内像素
+    this.region = opts.region ? clampRect(opts.region, this.doc.width, this.doc.height) : null;
     const total = Math.max(1, Math.min(64, this.frameCount | 0));
 
-    this.emit({ type: 'start', brief, maxIterations: this.maxIterations, frames: total });
+    this.emit({ type: 'start', brief, maxIterations: this.maxIterations, frames: total, region: this.region });
 
     try {
       for (let f = 0; f < total; f++) {
@@ -547,6 +631,8 @@ export class Agent {
         const bufBefore = this.doc.activeLayer.buffer.clone();
         this.history.begin(`AI 第 ${i + 1} 轮`);
         const report = runScript(script, this.doc, { mode, seed: opts.seed, deferRender: true });
+        // 选区限定：把区域外的像素恢复为执行前内容
+        if (this.region) this.maskOutsideRegion(bufBefore, report);
 
         /* ── 3. 渲染后端（风格管线） ── */
         let renderInfo = null;
@@ -557,8 +643,12 @@ export class Agent {
 
         /* ── 4. 渲染回灌 ── */
         this.emit({ type: 'phase', phase: 'render', index: i });
-        const thumbnail = this.renderer.export(112, true).dataURL;
-        const vision = this.renderer.visionDataURL(this.visionLongEdge);
+        const thumbnail = this.region
+          ? this.regionThumbnail()
+          : this.renderer.export(112, true).dataURL;
+        const vision = this.region
+          ? this.regionDataURL()
+          : this.renderer.visionDataURL(this.visionLongEdge);
         const ascii = report.changed > 0
           ? this.doc.activeLayer.buffer.toAscii(this.doc.palette, 32)
           : '';

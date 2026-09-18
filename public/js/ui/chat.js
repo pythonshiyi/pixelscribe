@@ -7,6 +7,7 @@ import { Provider } from '../ai/provider.js';
 import { DemoProvider } from '../ai/demo.js';
 import { Agent } from '../ai/agent.js';
 import { MultiAgent } from '../ai/multiagent.js';
+import { CostTracker } from '../ai/cost.js';
 
 export class ChatPanel {
   /** @param {any} app */
@@ -20,11 +21,37 @@ export class ChatPanel {
     this.agent = null;
     this.thinkingEl = null;
     this.rounds = [];
+    /** 会话成本累计（v2.4） */
+    this.cost = new CostTracker({
+      model: app?.settings?.model || app?.config?.model || '',
+      overrides: app?.settings?.pricing || {},
+    });
+  }
+
+  /** 同步成本面板。 */
+  refreshCost() {
+    const elx = $('#aiCost');
+    if (!elx) return;
+    elx.textContent = this.cost.calls ? this.cost.summary() : '暂无用量';
+    elx.title = this.cost.calls
+      ? `输入 ${this.cost.promptTokens} tok · 输出 ${this.cost.completionTokens} tok · 约 $${this.cost.cost.toFixed(4)}`
+      : '完成一次生成后显示 token 用量与花费估算';
   }
 
   init() {
     this.btnGenerate.addEventListener('click', () => this.generate());
     this.btnAbort.addEventListener('click', () => this.agent?.abort());
+    $('#btnCostReset')?.addEventListener('click', () => {
+      this.cost.reset();
+      this.refreshCost();
+      toast('已重置用量统计', 'ok', 1400);
+    });
+    $('#btnRegionGen')?.addEventListener('click', () => {
+      const region = this.app.renderer.selection;
+      if (!region) { toast('请先用选区工具（M）框选区域', 'warn'); return; }
+      this.generate({ region });
+    });
+    this.refreshCost();
     this.brief.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') this.generate();
     });
@@ -70,9 +97,16 @@ export class ChatPanel {
     });
   }
 
-  async generate() {
+  async generate(opts = {}) {
     const brief = this.brief.value.trim();
     if (!brief) { toast('请先描述你想要的画面', 'warn'); this.brief.focus(); return; }
+
+    /* 选区限定生成（v2.4） */
+    const region = opts.region ?? null;
+    if (opts.requireRegion && !this.app.renderer.selection) {
+      toast('请先用选区工具（M）框选区域', 'warn');
+      return;
+    }
 
     /* 应用目标尺寸 */
     const size = Number($('#aiSize').value);
@@ -135,7 +169,7 @@ export class ChatPanel {
     this._newLiveCard();
 
     try {
-      await this.agent.run(brief);
+      await this.agent.run(brief, { region });
     } finally {
       this.disabled(false);
       this.app.refreshLayers();
@@ -184,6 +218,8 @@ export class ChatPanel {
 
       case 'usage':
         this._lastUsage = e.usage;
+        this.cost.add(e.usage, this.app.settings.model || this.app.config.model);
+        this.refreshCost();
         break;
 
       case 'frame':

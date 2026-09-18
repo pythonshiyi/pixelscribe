@@ -849,3 +849,16 @@ kbd {
 }
 .preset-row b { flex: 0 0 auto; }
 .preset-row .hint { flex: 1; font-size: 11px; color: var(--fg-2); }
+/* 帧锁定 / 成本面板（v2.4） */
+.frame-thumb .flock {
+  position: absolute; right: 2px; top: 1px; font-size: 9px; line-height: 1;
+  background: rgba(0, 0, 0, .45); border-radius: 3px; padding: 0 2px;
+}
+.ai-cost-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+}
+.ai-cost {
+  flex: 1; font-size: 11px; color: var(--fg-2); font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--accent-2, #29adff) 8%, transparent);
+  border-radius: 6px; padding: 3px 8px;
+}

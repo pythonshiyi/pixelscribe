@@ -838,6 +838,80 @@ ok('新 DSL 指令可通过脚本面板运行', () => {
   assert(!$('#scriptReport').classList.contains('bad'), `报告错误：${$('#scriptReport').textContent}`);
 });
 
+/* ─────────── 形变补间 / 帧锁定 / 成本 / 选区内生成（v2.4） ─────────── */
+
+ok('补间对话框含算法选择', () => {
+  while (app.animation.length < 2) app.animation.duplicate(app.doc);
+  app.tweenDialog();
+  assert($('#twMethod'), '缺少算法下拉');
+  const opts = [...$('#twMethod').options].map((o) => o.value);
+  assert(opts.includes('blend') && opts.includes('morph'), '应有 blend 与 morph');
+  window.document.querySelector('#modalFoot .btn.ghost')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+});
+
+try {
+  app.animation.capture(app.doc);
+  const n0 = app.animation.length;
+  await app.doTween({ from: 0, to: 1, steps: 2, easing: 'linear', method: 'morph', useAI: false });
+  ok('光流形变补间插入中间帧', () => {
+    eq(app.animation.length, n0 + 2, `帧数 ${app.animation.length}`);
+    assert(app.animation.frames.some((f) => f.method === 'morph'), '应有 morph 标记帧');
+  });
+} catch (err) {
+  failures.push({ name: '形变补间', err });
+  console.log(`  \x1b[31m✗ 形变补间抛出\x1b[0m\n      ${err.stack}`);
+}
+
+ok('帧缓动对话框含锁定开关并可保存', () => {
+  app.frameEasingDialog(0);
+  assert($('#feLocked'), '缺少锁定开关');
+  $('#feLocked').checked = true;
+  const save = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('保存'));
+  save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.animation.frames[0].locked, true);
+  app.syncFrames();
+  assert(window.document.querySelector('#frameList .flock'), '应渲染锁定标记');
+  app.animation.frames[0].locked = false;
+});
+
+ok('成本面板存在并可重置', () => {
+  assert($('#aiCost') && $('#btnCostReset'), '缺少成本面板');
+  app.chat.cost.add({ prompt_tokens: 1200, completion_tokens: 300 });
+  app.chat.refreshCost();
+  assert($('#aiCost').textContent.includes('1 次'), `摘要异常：${$('#aiCost').textContent}`);
+  $('#btnCostReset').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  eq(app.chat.cost.calls, 0);
+  eq($('#aiCost').textContent, '暂无用量');
+});
+
+ok('选区内生成按钮存在', () => {
+  assert($('#btnRegionGen'), '缺少选区内生成按钮');
+});
+
+try {
+  app.doc.resize(32, 32);
+  app.doc.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+  app.doc.invalidate();
+  $('#aiBrief').value = '画一个史莱姆';
+  $('#aiMaxIter').value = '2';
+  $('#aiFrames').value = '1';
+  await app.chat.generate({ region: { x: 8, y: 8, w: 16, h: 16 } });
+  ok('选区内生成不污染区域外像素', () => {
+    const buf = app.doc.activeLayer.buffer;
+    let outside = 0;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        if (x >= 8 && y >= 8 && x < 24 && y < 24) continue;
+        if (buf.get(x, y).a !== 0) outside++;
+      }
+    }
+    eq(outside, 0, `区域外有 ${outside} 个像素被改动`);
+  });
+} catch (err) {
+  failures.push({ name: '选区内生成', err });
+  console.log(`  \x1b[31m✗ 选区内生成抛出\x1b[0m\n      ${err.stack}`);
+}
+
 /* ─────────── AI 闭环（演示模式） ─────────── */
 
 console.log('\n\x1b[38;5;213m▸ AI 面板（演示模式）\x1b[0m');

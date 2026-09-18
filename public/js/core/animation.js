@@ -43,12 +43,20 @@ function composeLayers(layers, width, height) {
   return out;
 }
 
+/** 捕获时的元数据字段（保持帧结构与 capture/empty 同步）。 */
+function frameMeta(prev, duration) {
+  return {
+    duration: prev?.duration ?? duration,
+    easing: prev?.easing ?? 'linear',
+    locked: Boolean(prev?.locked),
+  };
+}
+
 function cloneFrame(frame) {
   return {
     width: frame.width,
     height: frame.height,
-    duration: frame.duration,
-    easing: frame.easing,
+    ...frameMeta(frame, frame.duration),
     layers: frame.layers.map((l) => ({ ...l, meta: l.meta ? { ...l.meta } : null, data: new Uint8ClampedArray(l.data) })),
   };
 }
@@ -57,8 +65,7 @@ function emptyFrameLike(frame) {
   return {
     width: frame.width,
     height: frame.height,
-    duration: frame.duration,
-    easing: frame.easing,
+    ...frameMeta(frame, frame.duration),
     layers: frame.layers.map((l) => ({ ...l, meta: l.meta ? { ...l.meta } : null, data: new Uint8ClampedArray(l.data.length) })),
   };
 }
@@ -83,11 +90,12 @@ export class Animation {
   /** 用当前文档快照覆盖/追加为当前帧。 */
   capture(doc, reset = false) {
     const prev = !reset ? this.frames[this.current] : null;
+    if (prev?.locked) return prev; // 锁定帧不写入（保持一致性）
+    const meta = frameMeta(prev, this.frameDuration);
     const frame = {
       width: doc.width,
       height: doc.height,
-      duration: prev?.duration ?? this.frameDuration,
-      easing: prev?.easing ?? 'linear',
+      ...meta,
       layers: doc.layers.map((l) => ({
         id: l.id,
         name: l.name,
@@ -265,6 +273,7 @@ export class Animation {
         height: f.height,
         duration: f.duration,
         easing: f.easing,
+        locked: Boolean(f.locked),
         layers: f.layers.map((l) => ({
           id: l.id, name: l.name, kind: l.kind, meta: l.meta,
           visible: l.visible, opacity: l.opacity, locked: l.locked,
@@ -283,6 +292,7 @@ export class Animation {
       height: f.height,
       duration: f.duration || a.frameDuration,
       easing: f.easing || 'linear',
+      locked: Boolean(f.locked),
       layers: (f.layers || []).map((l) => ({
         id: l.id, name: l.name, kind: l.kind || 'raster', meta: l.meta || null,
         visible: l.visible !== false, opacity: l.opacity == null ? 1 : l.opacity,

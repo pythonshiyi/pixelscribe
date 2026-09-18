@@ -64,6 +64,10 @@ import { canRecordWebM, pickMimeType, recordWebM } from '../public/js/io/recorde
 import {
   STYLE_PRESETS as STYLE_LIBRARY, getStylePreset, applyStylePreset, serializeStylePreset, parseStylePreset,
 } from '../public/js/core/presets.js';
+import {
+  estimateFlow, smoothFlow, fillUnknown, morphBetween, morphBuffers, warp,
+} from '../public/js/core/flow.js';
+import { CostTracker, MODEL_PRICING, costOf, pricingFor, DEFAULT_PRICING } from '../public/js/ai/cost.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -2605,6 +2609,195 @@ describe('风格预设', () => {
   });
 });
 
+/* ─────────── 12.26 光流形变补间（v2.4） ─────────── */
+
+describe('光流估计', () => {
+  const mkBlob = (w, h, bx, by, bw = 3, bh = 3) => {
+    const b = new PixelBuffer(w, h);
+    b.fillRect(bx, by, bw, bh, { r: 255, g: 0, b: 0, a: 255 }, false);
+    return b;
+  };
+
+  it('估出向右平移的位移', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 2, 6);
+    const B = mkBlob(w, h, 11, 6);
+    const flow = estimateFlow(A.data, B.data, w, h);
+    const k = (7 * w + 3) * 2;
+    assert(flow[k] > 3, `应估出向右位移，实际 dx=${flow[k].toFixed(2)}`);
+  });
+
+  it('同 seed/同输入确定可复现', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 3, 3);
+    const B = mkBlob(w, h, 9, 9);
+    const f1 = estimateFlow(A.data, B.data, w, h);
+    const f2 = estimateFlow(A.data, B.data, w, h);
+    let same = true;
+    for (let i = 0; i < f1.length; i++) if (f1[i] !== f2[i]) same = false;
+    assert(same, '同输入应完全确定');
+  });
+
+  it('相同两帧光流为零', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 4, 4);
+    const flow = estimateFlow(A.data, A.data, w, h);
+    let max = 0;
+    for (let i = 0; i < flow.length; i += 2) max = Math.max(max, Math.abs(flow[i]));
+    eq(max, 0, '静止画面不应有位移');
+  });
+
+  it('smoothFlow 保持数组规模', () => {
+    const f = new Float32Array(8 * 8 * 2);
+    f[0] = 4;
+    const s = smoothFlow(f, 8, 8, 2);
+    eq(s.length, f.length);
+  });
+
+  it('fillUnknown 把稀疏位移扩散到全域', () => {
+    const w = 4, h = 4;
+    const flow = new Float32Array(w * h * 2);
+    const known = new Uint8Array(w * h);
+    const p = (1 * w + 1);
+    flow[p * 2] = 5;
+    known[p] = 1;
+    fillUnknown(flow, known, w, h, 8);
+    const q = (3 * w + 3);
+    assert(flow[q * 2] > 0, '未知区域应扩散到 5 附近');
+  });
+});
+
+describe('光流形变补间', () => {
+  const mkBlob = (w, h, bx, by, c) => {
+    const b = new PixelBuffer(w, h);
+    b.fillRect(bx, by, 3, 3, c, false);
+    return b;
+  };
+
+  it('t=0 得 A、t=1 得 B', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 2, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const B = mkBlob(w, h, 10, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const flow = estimateFlow(A.data, B.data, w, h);
+    eq(morphBetween(A.data, B.data, w, h, 0, flow).length, A.data.length);
+    eq(morphBuffers(A, B, 0, flow).diffCount(A), 0, 't=0 应等于 A');
+    eq(morphBuffers(A, B, 1, flow).diffCount(B), 0, 't=1 应等于 B');
+  });
+
+  it('中间帧落在两端之间（不是只叠影）', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 2, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const B = mkBlob(w, h, 11, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const flow = estimateFlow(A.data, B.data, w, h);
+    const mid = morphBuffers(A, B, 0.5, flow);
+    const b = mid.bounds();
+    assert(b, '中间帧应有内容');
+    assert(b.x1 > 2 && b.x0 < 11, `中间帧应介于两端：${JSON.stringify(b)}`);
+  });
+
+  it('warp 在 t=1 时接近 B（块匹配允许 1 像素级误差）', () => {
+    const w = 16, h = 16;
+    const A = mkBlob(w, h, 2, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const B = mkBlob(w, h, 10, 6, { r: 255, g: 0, b: 0, a: 255 });
+    const flow = estimateFlow(A.data, B.data, w, h);
+    const out = warp(A.data, w, h, flow, 1);
+    const buf = new PixelBuffer(w, h);
+    buf.data.set(out);
+    const diff = buf.diffCount(B);
+    assert(diff < 64, `t=1 的 warp 应接近 B，差异 ${diff}/${w * h}`);
+    assert(buf.opaqueCount() >= B.opaqueCount() - 2, '内容不应丢失');
+  });
+});
+
+/* ─────────── 12.27 成本统计（v2.4） ─────────── */
+
+describe('成本统计', () => {
+  it('pricingFor 命中已知与兜底', () => {
+    eq(pricingFor('gpt-4o').input, 2.5);
+    deepEq(pricingFor('unknown-model-xyz'), DEFAULT_PRICING);
+    deepEq(pricingFor('gpt-4o', { 'gpt-4o': { input: 9, output: 9 } }), { input: 9, output: 9 });
+    assert(MODEL_PRICING['deepseek-flash'], '应含默认模型定价');
+  });
+
+  it('costOf 按 token 计价', () => {
+    const c = costOf({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }, 'gpt-4o');
+    assert(Math.abs(c - 12.5) < 1e-6, `实际 ${c}`);
+    eq(costOf(null, 'gpt-4o'), 0);
+  });
+
+  it('CostTracker 累计并给出摘要', () => {
+    const t = new CostTracker({ model: 'gpt-4o' });
+    t.add({ prompt_tokens: 1000, completion_tokens: 500 });
+    t.add({ prompt_tokens: 2000, completion_tokens: 1000 });
+    eq(t.calls, 2);
+    eq(t.promptTokens, 3000);
+    eq(t.completionTokens, 1500);
+    eq(t.totalTokens, 4500);
+    assert(t.cost > 0, '应有花费');
+    assert(t.summary().includes('2 次'), t.summary());
+    t.reset();
+    eq(t.calls, 0);
+    eq(t.cost, 0);
+  });
+
+  it('演示模式为 0 成本', () => {
+    const t = new CostTracker({ model: 'demo' });
+    t.add({ prompt_tokens: 9999, completion_tokens: 9999 });
+    eq(t.cost, 0);
+  });
+
+  it('estimateFrames 按每帧均摊估算', () => {
+    const t = new CostTracker({ model: 'gpt-4o' });
+    t.frames = 4;
+    t.add({ prompt_tokens: 4000, completion_tokens: 0 });
+    const per = t.cost / 4;
+    assert(Math.abs(t.estimateFrames(8) - per * 8) < 1e-9);
+  });
+});
+
+/* ─────────── 12.28 帧锁定与选区限定（v2.4） ─────────── */
+
+describe('帧锁定与选区限定', () => {
+  it('锁定帧 capture 不写入', () => {
+    const d = new PixelDocument(8, 8);
+    d.activeLayer.buffer.clear({ r: 10, g: 0, b: 0, a: 255 });
+    const a = new Animation({ fps: 8 });
+    a.capture(d, true);
+    a.frames[0].locked = true;
+    d.activeLayer.buffer.clear({ r: 220, g: 0, b: 0, a: 255 });
+    d.invalidate();
+    a.capture(d);
+    eq(a.frameBuffer(0).get(0, 0).r, 10, '锁定帧应保持原内容');
+    a.frames[0].locked = false;
+    a.capture(d);
+    eq(a.frameBuffer(0).get(0, 0).r, 220, '解锁后应可写入');
+  });
+
+  it('locked 字段可 JSON 往返', () => {
+    const d = new PixelDocument(8, 8);
+    const a = new Animation();
+    a.capture(d, true);
+    a.frames[0].locked = true;
+    const back = Animation.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    eq(back.frames[0].locked, true);
+  });
+
+  it('maskOutsideRegion 恢复区域外像素', () => {
+    const d = new PixelDocument(16, 16);
+    runScript('bg c1', d, { mode: 'replace' });
+    const agent = new Agent({ provider: {}, renderer: {}, doc: d, history: new History(d) });
+    agent.region = { x: 4, y: 4, w: 8, h: 8 };
+    const before = d.activeLayer.buffer.clone();
+    const outsideBefore = before.get(0, 0);
+    runScript('bg c5', d, { mode: 'replace' });
+    assert(d.activeLayer.buffer.get(0, 0).g !== outsideBefore.g, '前置条件：区域外已被改动');
+    const report = { changed: 256 };
+    agent.maskOutsideRegion(before, report);
+    deepEq(d.activeLayer.buffer.get(0, 0), outsideBefore, '区域外应恢复');
+    eq(d.activeLayer.buffer.get(8, 8).g, d.palette.colors[5].g, '区域内应保留新内容');
+  });
+});
+
 /* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
 async function runIntegration() {
   const { default: http } = await import('node:http');
@@ -3079,6 +3272,42 @@ async function runIntegration() {
       assert(recRes && recRes.blob, '应产出 blob');
       eq(recRes.frames, 2);
       eq(recRes.durationMs, 20);
+    });
+  }
+
+  // 光流形变补间（Agent.tween method=morph）
+  group = '端到端 · 形变补间';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  {
+    const fd = new Doc(16, 16);
+    fd.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+    fd.activeLayer.buffer.fillRect(2, 6, 3, 3, { r: 255, g: 0, b: 0, a: 255 }, false);
+    fd.invalidate();
+    const fanim = new Anim({ fps: 8 });
+    fanim.capture(fd, true);
+    fanim.duplicate(fd);
+    fd.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 0 });
+    fd.activeLayer.buffer.fillRect(11, 6, 3, 3, { r: 255, g: 0, b: 0, a: 255 }, false);
+    fd.invalidate();
+    fanim.capture(fd);
+    const fagent = new Agent({
+      provider: null, renderer, doc: fd, history: new Hist(fd), animation: fanim,
+    });
+    let fres = null;
+    try {
+      fres = await fagent.tween({ from: 0, to: 1, steps: 2, easing: 'linear', useAI: false, method: 'morph' });
+    } catch (err) { failures.push({ group, name: 'morph tween', err }); }
+    check('光流形变补间插入中间帧并标记 method', () => {
+      eq(fres.inserted, 2);
+      eq(fres.method, 'morph');
+      eq(fanim.length, 4);
+      eq(fanim.frames[1].method, 'morph', '应标记 morph');
+      const b = fanim.frameBuffer(2).bounds();
+      assert(b && b.x0 >= 2 && b.x1 <= 14, `中间帧应在画布内：${JSON.stringify(b)}`);
+    });
+    check('形变补间保持帧尺寸且内容非空', () => {
+      eq(fanim.frames[1].width, 16);
+      assert(fanim.frameBuffer(1).opaqueCount() > 0, '中间帧应有内容');
     });
   }
 

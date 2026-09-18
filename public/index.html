@@ -234,6 +234,11 @@
             <button class="btn primary" id="btnGenerate"><svg><use href="#i-wand"/></svg><span>开始生成</span></button>
             <button class="btn danger" id="btnAbort" disabled><svg><use href="#i-stop"/></svg><span>中止</span></button>
             <button class="btn ghost" id="btnLocalRedraw" title="用当前选区做局部重绘（M 键框选）"><svg><use href="#i-wand"/></svg><span>局部重绘</span></button>
+            <button class="btn ghost" id="btnRegionGen" title="只让 AI 在选区内作画（M 键框选）"><svg><use href="#i-select"/></svg><span>选区内生成</span></button>
+          </div>
+          <div class="ai-cost-row">
+            <span class="ai-cost" id="aiCost">暂无用量</span>
+            <button class="btn small ghost" id="btnCostReset" title="重置会话用量统计">重置</button>
           </div>
           <div class="ai-status" id="aiStatus">就绪</div>
         </div>

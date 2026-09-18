@@ -525,7 +525,11 @@ export class App {
         el('label', { class: 'mini-field' }, [el('span', { text: '中间帧数' }), el('input', { type: 'number', id: 'twSteps', min: '1', max: '32', value: '3' })]),
         el('label', { class: 'mini-field' }, [el('span', { text: '缓动' }), el('select', { id: 'twEasing' }, EASINGS.map((e) => el('option', { value: e.id, text: e.label })))]),
       ]),
-      el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'twAI', checked: !this.config.demoMode }), el('span', { text: 'AI 补间（需模型）' })]),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '算法' }), el('select', { id: 'twMethod' }, [
+        el('option', { value: 'blend', text: '交叉溶解（快，适合淡入淡出/形变小的动作）' }),
+        el('option', { value: 'morph', text: '光流形变（慢，适合位移大的运动，无重影）' }),
+      ])]),
+      el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'twAI', checked: !this.config.demoMode }), el('span', { text: 'AI 补间（需模型，优先于算法）' })]),
     ]);
     setTimeout(() => {
       const fs = $('#twFrom'); if (fs) fs.value = String(from);
@@ -546,6 +550,7 @@ export class App {
               to: Number($('#twTo')?.value) || 1,
               steps: Math.max(1, Math.min(32, Number($('#twSteps')?.value) || 3)),
               easing: $('#twEasing')?.value || 'easeInOutQuad',
+              method: $('#twMethod')?.value === 'morph' ? 'morph' : 'blend',
               useAI: $('#twAI')?.checked === true,
               brief: $('#aiBrief')?.value?.trim() || this.doc.title || '',
             };
@@ -559,36 +564,33 @@ export class App {
 
   async doTween(o) {
     let result = null;
-    if (o.useAI) {
-      const provider = this.chat.makeProvider();
-      const agent = new Agent({
-        provider,
-        renderer: this.renderer,
-        doc: this.doc,
-        history: this.history,
-        animation: this.animation,
-        neuralAvailable: Boolean(this.config.neuralRender),
-        visionLongEdge: this.config.visionLongEdge || 384,
-        visionDetail: this.settings.visionDetail ?? this.config.visionDetail ?? 'high',
-        vision: this.settings.vision ?? this.config.vision ?? 'auto',
-        maxTokens: this.settings.maxTokens ?? this.config.maxTokens ?? 2048,
-        neuralPrompt: o.brief,
-      });
-      this.chat.setStatus('AI 补间中…', 'busy');
-      this.chat.disabled(true);
-      try {
-        result = await agent.tween({ ...o, useAI: true });
-        toast(`已生成 ${result.inserted} 张 AI 补间帧（${easingLabel(o.easing)}）`, 'ok');
-      } catch (err) {
-        result = insertTween(this.animation, o);
-        toast(`AI 补间失败（${err.message}），已用程序化补间`, 'warn', 3200);
-      } finally {
-        this.chat.disabled(false);
-        this.chat.setStatus('就绪', '');
-      }
-    } else {
-      result = insertTween(this.animation, o);
-      toast(`已插入 ${result.inserted} 张补间帧（${easingLabel(o.easing)}）`, 'ok');
+    const aiWanted = o.useAI && !this.config.demoMode;
+    const agent = new Agent({
+      provider: aiWanted ? this.chat.makeProvider() : null,
+      renderer: this.renderer,
+      doc: this.doc,
+      history: this.history,
+      animation: this.animation,
+      neuralAvailable: Boolean(this.config.neuralRender),
+      visionLongEdge: this.config.visionLongEdge || 384,
+      visionDetail: this.settings.visionDetail ?? this.config.visionDetail ?? 'high',
+      vision: this.settings.vision ?? this.config.vision ?? 'auto',
+      maxTokens: this.settings.maxTokens ?? this.config.maxTokens ?? 2048,
+      neuralPrompt: o.brief,
+    });
+    this.chat.setStatus(aiWanted ? 'AI 补间中…' : '补间中…', 'busy');
+    if (aiWanted) this.chat.disabled(true);
+    try {
+      result = await agent.tween({ ...o, useAI: aiWanted });
+      const label = aiWanted ? 'AI' : (result.method === 'morph' ? '光流形变' : '交叉溶解');
+      toast(`已插入 ${result.inserted} 张${label}补间帧（${easingLabel(o.easing)}）`, 'ok');
+    } catch (err) {
+      const fallback = insertTween(this.animation, o);
+      result = fallback;
+      toast(`补间失败（${err.message}），已用交叉溶解`, 'warn', 3200);
+    } finally {
+      if (aiWanted) this.chat.disabled(false);
+      this.chat.setStatus('就绪', '');
     }
     if (result?.inserted) {
       this.animation.current = result.at - 1; // 让 select 的 capture 写回起始帧
@@ -612,6 +614,9 @@ export class App {
       }, [
         el('img', { src: this.animation.thumbnailDataURL(i, 40), alt: `帧 ${i + 1}` }),
         el('span', { class: 'fno', text: String(i + 1) }),
+        this.animation.frames[i].locked
+          ? el('span', { class: 'flock', text: '🔒', title: '已锁定：AI 生成/编辑不会改写此帧' })
+          : null,
         this.animation.frames[i].easing && this.animation.frames[i].easing !== 'linear'
           ? el('span', { class: 'fease', text: '∿', title: `缓动：${easingLabel(this.animation.frames[i].easing)}` })
           : null,
@@ -671,6 +676,10 @@ export class App {
         el('span', { text: '缓动' }),
         el('select', { id: 'feEasing' }, EASINGS.map((e) => el('option', { value: e.id, text: e.label }))),
       ]),
+      el('label', { class: 'switch wide' }, [
+        el('input', { type: 'checkbox', id: 'feLocked', checked: Boolean(frame.locked) }),
+        el('span', { text: '锁定此帧（AI 生成/编辑不会改写，保证帧间一致性）' }),
+      ]),
     ]);
     setTimeout(() => { const s = $('#feEasing'); if (s) s.value = frame.easing || 'linear'; }, 0);
     modal({
@@ -694,9 +703,10 @@ export class App {
           kind: 'primary',
           onClick: () => {
             frame.easing = $('#feEasing')?.value || 'linear';
+            frame.locked = $('#feLocked')?.checked === true;
             this.markDirty();
             this.syncFrames();
-            toast(`第 ${index + 1} 帧缓动：${easingLabel(frame.easing)}`, 'ok', 1600);
+            toast(`第 ${index + 1} 帧：${easingLabel(frame.easing)}${frame.locked ? ' · 已锁定' : ''}`, 'ok', 1600);
           },
         },
       ],

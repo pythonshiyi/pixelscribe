@@ -3,7 +3,7 @@
 > 让**不具备原生生图能力**的多模态大模型，通过「结构化绘制 + 视觉回灌 + 自我修正」闭环，
 > 产出专业级像素美术作品。
 
-- 版本：`2.0.0`
+- 版本：`2.4.0`
 - 文档状态：定稿
 - 关键词：PixelScript DSL · 程序化先验 · 神经渲染 · 视觉闭环 · 像素级可控 · 零构建 Web 应用
 
@@ -544,10 +544,10 @@ async function run(agent) {
 | **v1.7** | **大画布（≤2048²）+ 百分比坐标 + 分块回灌（改动热区原分辨率裁剪图）+ 平滑超分导出 + IndexedDB 大文档存储** |
 | **v1.8** | **16 种缓动曲线 + 帧间补间（程序化交叉溶解 / AI tween）+ 音频时间轴（波形 / 拍点 / BPM / 播放同步 / 按拍对齐帧时长）** |
 | **v2.0** | **多智能体协作（构图师 / 上色师 / 审查师）+ SVG 矢量分支后端** |
-| v2.1 | 图层组与多选、选区变换（平移/缩放/旋转）、复制粘贴与浮动选区 |
-| v2.2 | 时间轴曲线编辑器（关键帧缓动可视化）、音频 scrub / 缩放、导出 WebM/MP4（含音轨） |
-| v2.3 | DSL 扩展（置换映射、路径/图案填充、文字轮廓）、k-means 自动配色、风格预设保存 |
-| v2.4 | AI 进阶：光流式形变补间（非交叉溶解）、选区局部 Agent、帧间一致性锁定、token 成本面板 |
+| **v2.1** | **选区剪贴板 / 浮动选区 / 变换（翻转·旋转·缩放·平移）+ 图层组与多选图层操作** |
+| **v2.2** | **帧拖拽排序 + 单帧/全帧缓动 + 音频波形 scrub·缩放 + WebM 录像导出（可混音轨）** |
+| **v2.3** | **DSL 扩展（radial / pattern / map）+ k-means 配色提取 + 风格预设（内置 7 款 + 自定义导入导出）** |
+| **v2.4** | **光流形变补间 + 选区限定生成 + 帧锁定一致性 + token 成本面板** |
 | v3.0 | `.pxsproj` 工程文件（文档+动画+音频打包）、Aseprite/PSD 导入、自定义 DSL 指令插件 API、鉴权/配额服务化、i18n / PWA |
 
 **质量与性能（贯穿各版本）**：Web Worker 渲染大画布、脏矩形增量重绘、IndexedDB 分块存储、
@@ -598,14 +598,18 @@ async function run(agent) {
 │     ├─ util/color.js        颜色解析 / 转换 / Alpha 混合
 │     ├─ io/png.js            纯 JS PNG 编码器（零依赖，浏览器/Node 通用）
 │     ├─ io/svg.js            纯 JS SVG 写出器（游程合并为 path）
+│     ├─ io/recorder.js       MediaRecorder 逐帧录制 WebM（可混音轨）
 │     ├─ core/
-│     │  ├─ palette.js        调色板与预设
-│     │  ├─ buffer.js         像素缓冲与光栅化图元
-│     │  ├─ document.js       文档 / 图层 / 合成
+│     │  ├─ palette.js        调色板与预设（含 k-means 提取）
+│     │  ├─ buffer.js         像素缓冲与光栅化图元（含 radial/pattern/map）
+│     │  ├─ document.js       文档 / 图层 / 图层组 / 合成
 │     │  ├─ history.js        撤销栈
 │     │  ├─ easing.js         缓动曲线
 │     │  ├─ tween.js          帧间补间（交叉溶解）
+│     │  ├─ flow.js           光流估计与形变补间
+│     │  ├─ selection.js      选区区域运算
 │     │  ├─ audio.js          音频峰值 / 拍点 / 时间轴
+│     │  ├─ presets.js        风格预设
 │     │  └─ renderer.js       视口渲染与导出
 │     ├─ lang/
 │     │  ├─ font5x7.js        位图字体
@@ -614,8 +618,9 @@ async function run(agent) {
 │     │  ├─ provider.js       LLM 客户端（流式 + 视觉）
 │     │  ├─ prompts.js        提示词工程
 │     │  ├─ demo.js           离线演示 Provider 与模板库
-│     │  ├─ agent.js          视觉闭环状态机（含 AI 补间）
-│     │  └─ multiagent.js     多智能体协作（构图/上色/审查）
+│     │  ├─ agent.js          视觉闭环状态机（含 AI 补间 / 选区限定）
+│     │  ├─ multiagent.js     多智能体协作（构图/上色/审查）
+│     │  └─ cost.js           token 用量与成本统计
 │     └─ ui/
 │        ├─ dom.js            DOM 小工具（$ / el / modal / toast）
 │        ├─ app.js            应用控制器（装配层）
@@ -623,16 +628,16 @@ async function run(agent) {
 │        ├─ panels.js         图层 / 色板 / 脚本面板
 │        └─ chat.js           AI 面板与轮次时间线
 └─ test/
-   ├─ selftest.mjs            单元 / 集成自测（259 项）
-   └─ dom-smoke.mjs           jsdom 无头 UI 冒烟测试（74 项）
+   ├─ selftest.mjs            单元 / 集成自测（315 项）
+   └─ dom-smoke.mjs           jsdom 无头 UI 冒烟测试（94 项）
 ```
 
 ## 附录 C：测试矩阵
 
 | 套件 | 命令 | 覆盖 |
 |---|---|---|
-| 单元 / 集成 | `npm run test:unit` | 颜色、调色板、缓冲图元、文档、历史、43 条指令、语法预检、回复解析、PNG 编解码、AI 提示词、字体、缓动/补间、音频峰值与拍点、SVG、多智能体、端到端范例渲染、**真实 HTTP 视觉闭环**、中止传播 |
-| UI 冒烟 | `npm run test:dom` | jsdom 中真实启动应用：工具栏、对称、缩放、调色板、图层、画布指针绘制、选区、撤销重做、快捷键、脚本运行、模态框、AI 演示闭环、补间与音频控件、SVG 导出、持久化、导出 |
+| 单元 / 集成 | `npm run test:unit` | 颜色、调色板、缓冲图元、文档、历史、46 条指令、语法预检、回复解析、PNG 编解码、AI 提示词、字体、缓动/补间、光流形变、音频峰值与拍点、SVG、多智能体、DSL radial/pattern/map、k-means、风格预设、成本统计、帧锁定与选区限定、端到端范例渲染、**真实 HTTP 视觉闭环**、中止传播 |
+| UI 冒烟 | `npm run test:dom` | jsdom 中真实启动应用：工具栏、对称、缩放、调色板、图层组、画布指针绘制、选区编辑、撤销重做、快捷键、脚本运行、模态框、AI 演示闭环、补间与音频控件、k-means 与风格预设、SVG/WebM 导出、帧拖拽与锁定、成本面板、选区内生成、持久化 |
 | 全部 | `npm test` | 上述两者，任一失败即退出非零 |
 
 
