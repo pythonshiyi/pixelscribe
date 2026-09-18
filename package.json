@@ -1,6 +1,6 @@
 {
   "name": "pixelscribe",
-  "version": "1.7.0",
+  "version": "2.0.0",
   "private": true,
   "description": "像素画笔 PixelScribe - 让多模态大模型通过 PixelScript DSL + 程序化/神经渲染 + 视觉闭环产出像素美术与写实渲染",
   "type": "module",

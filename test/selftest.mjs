@@ -47,6 +47,15 @@ import {
 import { lzwEncode, encodeGIF, quantizeFrame } from '../public/js/io/gif.js';
 import { encodeAseprite } from '../public/js/io/aseprite.js';
 import { Animation } from '../public/js/core/animation.js';
+import { EASINGS, ease, easingFn, hasEasing, easingLabel } from '../public/js/core/easing.js';
+import {
+  blendFrames, blendBuffers, insertTween, tweenFrameList, tweenAcrossKeys,
+} from '../public/js/core/tween.js';
+import {
+  computePeaks, detectBeats, bpmFromBeats, frameDurationsForBeats, AudioTrack, DEFAULT_BUCKETS,
+} from '../public/js/core/audio.js';
+import { encodeSVG, svgDataURL } from '../public/js/io/svg.js';
+import { MultiAgent, ROLES } from '../public/js/ai/multiagent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -2014,8 +2023,233 @@ describe('平滑超分', () => {
   });
 });
 
-/* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
+/* ─────────── 12.16 缓动曲线（v1.8） ─────────── */
 
+describe('缓动曲线 easing', () => {
+  it('线性与端点', () => {
+    eq(ease('linear', 0), 0);
+    eq(ease('linear', 0.5), 0.5);
+    eq(ease('linear', 1), 1);
+  });
+
+  it('缓入 < 线性 < 缓出（中段）', () => {
+    assert(ease('easeInQuad', 0.4) < 0.4, '缓入应更慢');
+    assert(ease('easeOutQuad', 0.4) > 0.4, '缓出应更快');
+  });
+
+  it('step 定格：t<1 时为 0', () => {
+    eq(ease('step', 0.99), 0);
+  });
+
+  it('回弹类会超过 1', () => {
+    let over = false;
+    for (let i = 1; i < 20; i++) if (ease('easeOutBack', i / 20) > 1) over = true;
+    assert(over, 'easeOutBack 应有过冲');
+  });
+
+  it('未知缓动回退线性，标签可用', () => {
+    eq(hasEasing('no-such'), false);
+    eq(easingFn('no-such')(0.25), 0.25);
+    assert(EASINGS.length >= 10, '缓动列表过少');
+    eq(easingLabel('linear'), '线性');
+  });
+});
+
+/* ─────────── 12.17 补间 tween（v1.8） ─────────── */
+
+describe('帧间补间 tween', () => {
+  const mkFrame = (w, h, color) => {
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < d.length; i += 4) { d[i] = color.r; d[i + 1] = color.g; d[i + 2] = color.b; d[i + 3] = color.a; }
+    return { width: w, height: h, duration: 100, easing: 'linear', layers: [{ id: 'L', name: 'l', kind: 'raster', visible: true, opacity: 1, data: d }] };
+  };
+
+  it('blendFrames t=0 得 A，t=1 得 B，t=0.5 取中', () => {
+    const a = mkFrame(2, 2, { r: 0, g: 0, b: 0, a: 255 });
+    const b = mkFrame(2, 2, { r: 200, g: 100, b: 40, a: 255 });
+    eq(blendFrames(a, b, 0).layers[0].data[0], 0);
+    eq(blendFrames(a, b, 1).layers[0].data[0], 200);
+    const mid = blendFrames(a, b, 0.5).layers[0].data;
+    assert(Math.abs(mid[0] - 100) <= 2, `中值应约 100，实际 ${mid[0]}`);
+    eq(mid[3], 255, '不透明应保持');
+  });
+
+  it('透明到不透明的补间按 alpha 加权', () => {
+    const clear = mkFrame(1, 1, { r: 0, g: 0, b: 0, a: 0 });
+    const solid = mkFrame(1, 1, { r: 255, g: 0, b: 0, a: 255 });
+    const mid = blendFrames(clear, solid, 0.5).layers[0].data;
+    assert(mid[3] > 100 && mid[3] < 155, `alpha 应约 128，实际 ${mid[3]}`);
+    eq(mid[0], 255, '半透明处颜色仍应为红');
+  });
+
+  it('blendBuffers 与帧级补间一致', () => {
+    const a = new PixelBuffer(1, 1); a.set(0, 0, { r: 0, g: 0, b: 0, a: 255 });
+    const b = new PixelBuffer(1, 1); b.set(0, 0, { r: 100, g: 200, b: 0, a: 255 });
+    const m = blendBuffers(a, b, 0.5).get(0, 0);
+    assert(Math.abs(m.g - 100) <= 2, `应为中值，实际 ${m.g}`);
+  });
+
+  it('insertTween 插入正确数量与位置', () => {
+    const d = new PixelDocument(2, 2);
+    d.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 255 });
+    const anim = new Animation({ fps: 10 });
+    anim.capture(d, true);
+    anim.duplicate(d);
+    d.activeLayer.buffer.clear({ r: 255, g: 255, b: 255, a: 255 }); d.invalidate();
+    anim.capture(d);
+    const r = insertTween(anim, { from: 0, to: 1, steps: 3, easing: 'linear' });
+    eq(r.inserted, 3);
+    eq(anim.length, 5);
+    eq(anim.frames[2].tween, true, '插入帧应标记 tween');
+    eq(anim.frames[4].layers[0].data[0], 255, '末帧仍为白色');
+  });
+
+  it('tweenFrameList 按缓动单调推进', () => {
+    const d = new PixelDocument(2, 2);
+    d.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 255 });
+    const anim = new Animation();
+    anim.capture(d, true);
+    anim.duplicate(d);
+    d.activeLayer.buffer.clear({ r: 200, g: 0, b: 0, a: 255 }); d.invalidate();
+    anim.capture(d);
+    const list = tweenFrameList(anim, { from: 0, to: 1, steps: 4, easing: 'easeInQuad' });
+    eq(list.length, 4);
+    for (let i = 1; i < list.length; i++) {
+      assert(list[i].layers[0].data[0] >= list[i - 1].layers[0].data[0], '缓入应单调不减');
+    }
+  });
+
+  it('tweenAcrossKeys 跨多个关键帧', () => {
+    const d = new PixelDocument(2, 2);
+    const anim = new Animation();
+    d.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 255 });
+    anim.capture(d, true);
+    for (const v of [100, 200, 255]) {
+      anim.duplicate(d);
+      d.activeLayer.buffer.clear({ r: v, g: 0, b: 0, a: 255 }); d.invalidate();
+      anim.capture(d);
+    }
+    eq(anim.length, 4);
+    const r = tweenAcrossKeys(anim, [0, 2, 3], { steps: 1, easing: 'linear' });
+    eq(r.inserted, 2);
+    eq(anim.length, 6);
+  });
+
+  it('帧 easing 元数据可持久化', () => {
+    const d = new PixelDocument(2, 2);
+    const anim = new Animation();
+    anim.capture(d, true);
+    anim.frames[0].easing = 'easeOutBounce';
+    const back = Animation.fromJSON(JSON.parse(JSON.stringify(anim.toJSON())));
+    eq(back.frames[0].easing, 'easeOutBounce');
+  });
+});
+
+/* ─────────── 12.18 音频 / 时间轴（v1.8） ─────────── */
+
+describe('音频工具', () => {
+  it('computePeaks 分段峰值正确', () => {
+    const samples = new Float32Array([0, 0, 1, -1, 0, 0.5, 0, 0]);
+    const p = computePeaks(samples, 2);
+    eq(p.buckets, 2);
+    eq(p.max[0], 1, '第一段峰值为 1');
+    eq(p.min[0], -1);
+    eq(p.max[1], 0.5);
+  });
+
+  it('computePeaks 空输入安全', () => {
+    const p = computePeaks([], 4);
+    eq(p.peak.length, 4);
+    eq(p.peak[0], 0);
+  });
+
+  it('detectBeats 找到脉冲位置', () => {
+    const b = new Float32Array(400);
+    for (let i = 0; i < b.length; i++) b[i] = 0.1;
+    b[40] = 1; b[140] = 1; b[240] = 1; b[340] = 1; // 每 100 桶一个拍
+    const beats = detectBeats(b, 4, { minGapSec: 0.3 });
+    assert(beats.length >= 3, `拍点过少：${beats.length}`);
+    assert(Math.abs(beats[0] - 0.4) < 0.05, `首拍约 0.4s，实际 ${beats[0]}`);
+  });
+
+  it('bpmFromBeats 由间隔估 BPM', () => {
+    const beats = [0, 0.5, 1.0, 1.5, 2.0]; // 120 BPM
+    eq(bpmFromBeats(beats), 120);
+    eq(bpmFromBeats([0]), 0);
+  });
+
+  it('frameDurationsForBeats 均匀与按拍分配', () => {
+    deepEq(frameDurationsForBeats(4, 4000, []), [1000, 1000, 1000, 1000]);
+    const d = frameDurationsForBeats(4, 4000, [0, 0.5, 1.0, 1.5, 2.0]);
+    deepEq(d, [500, 500, 500, 500]);
+  });
+
+  it('AudioTrack 序列化往返（Node 无音频解码）', () => {
+    const t = new AudioTrack();
+    t.name = 'demo.mp3';
+    t.duration = 2;
+    t.bpm = 120;
+    t.beats = [0.5, 1, 1.5];
+    const big = new Float32Array(2048);
+    big[10] = 0.8;
+    t.peaks = computePeaks(big, 2048);
+    const back = AudioTrack.fromJSON(JSON.parse(JSON.stringify(t.toJSON())));
+    eq(back.name, 'demo.mp3');
+    eq(back.bpm, 120);
+    eq(back.beats.length, 3);
+    assert(back.peaks.buckets <= 512, `持久化峰值应压缩，实际 ${back.peaks.buckets}`);
+    eq(DEFAULT_BUCKETS, 2048);
+  });
+});
+
+/* ─────────── 12.19 SVG 矢量后端（v2.0） ─────────── */
+
+describe('SVG 写出器', () => {
+  it('输出合法 SVG 且尺寸按 scale', () => {
+    const b = new PixelBuffer(2, 2);
+    b.clear({ r: 255, g: 0, b: 0, a: 255 });
+    const svg = encodeSVG(b.data, 2, 2, { scale: 4 });
+    assert(svg.startsWith('<?xml'), '应有 XML 声明');
+    assert(svg.includes('width="8" height="8"'), '尺寸应为 8×8');
+    assert(svg.includes('viewBox="0 0 8 8"'), 'viewBox 正确');
+    assert(svg.includes('shape-rendering="crispEdges"'), '像素风应硬边');
+    assert(svg.includes('#ff0000'), '应含红色');
+    assert(svg.endsWith('</svg>\n'), '应正确闭合');
+  });
+
+  it('同色横向游程合并为单条 path', () => {
+    const b = new PixelBuffer(4, 1);
+    for (let x = 0; x < 4; x++) b.set(x, 0, { r: 0, g: 255, b: 0, a: 255 });
+    const svg = encodeSVG(b.data, 4, 1, { scale: 1 });
+    const paths = svg.match(/<path /g) || [];
+    eq(paths.length, 1, '一行同色应合并为 1 条 path');
+    assert(svg.includes('M0 0h4v1h-4z'), '游程应为 h4');
+  });
+
+  it('透明像素被跳过，半透明写 fill-opacity', () => {
+    const b = new PixelBuffer(2, 1);
+    b.set(0, 0, { r: 0, g: 0, b: 0, a: 0 });
+    b.set(1, 0, { r: 10, g: 20, b: 30, a: 128 });
+    const svg = encodeSVG(b.data, 2, 1, { scale: 1 });
+    assert(!svg.includes('M0 0h2'), '不应包含透明游程');
+    assert(svg.includes('fill-opacity="0.502"'), '半透明应写 opacity');
+  });
+
+  it('背景色与标题', () => {
+    const b = new PixelBuffer(1, 1);
+    b.set(0, 0, { r: 1, g: 2, b: 3, a: 255 });
+    const svg = encodeSVG(b.data, 1, 1, { background: { r: 255, g: 255, b: 255, a: 255 }, title: 'A<B' });
+    assert(svg.includes('<rect width="1" height="1" fill="#ffffff"'), '应含背景矩形');
+    assert(svg.includes('&lt;B'), '标题应转义');
+  });
+
+  it('svgDataURL 返回 data URL', () => {
+    const url = svgDataURL('<svg/>');
+    assert(url.startsWith('data:image/svg+xml;base64,'), '应为 SVG dataURL');
+  });
+});
+
+/* ─────────── 13. 端到端：真实 HTTP 闭环 ─────────── */
 async function runIntegration() {
   const { default: http } = await import('node:http');
   const { Provider } = await import('../public/js/ai/provider.js');
@@ -2350,6 +2584,82 @@ async function runIntegration() {
   check('abort() 在 1 秒内终止闭环', () => {
     assert(Date.now() - t0 < 1000, `耗时 ${Date.now() - t0}ms`);
     eq(doc2.activeLayer.buffer.opaqueCount(), 0, '中止后不应产生绘制');
+  });
+
+  // 多智能体协作（DemoProvider）
+  group = '端到端 · 多智能体协作';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const maDoc = new Doc(32, 32);
+  const maEvents = [];
+  const ma = new MultiAgent({
+    provider: new DemoProvider({ width: 32, height: 32 }),
+    renderer, doc: maDoc, history: new Hist(maDoc),
+    maxIterations: 4, visionLongEdge: 128,
+    onEvent: (e) => maEvents.push(e),
+  });
+  let maRounds = [];
+  try { maRounds = await ma.run('画一个机器人'); } catch (err) { failures.push({ group, name: '多智能体', err }); }
+  check('多智能体产出角色化的多轮迭代', () => {
+    assert(maRounds.length >= 2, `轮次过少 ${maRounds.length}`);
+    eq(maRounds[0].role, 'composer');
+    assert(maRounds.some((r) => r.role === 'colorist'), '应含上色师');
+    assert(maRounds.some((r) => r.role === 'reviewer'), '应含审查师');
+    assert(maDoc.activeLayer.buffer.opaqueCount() > 0, '应产生绘制');
+  });
+  check('多智能体事件带角色与 done', () => {
+    assert(maEvents.some((e) => e.type === 'phase' && e.role === 'composer'), 'phase 应带角色');
+    assert(maEvents.some((e) => e.type === 'iteration' && e.iteration.role), 'iteration 应带角色');
+    assert(maEvents.some((e) => e.type === 'done'), '应有 done 事件');
+    eq(ROLES.composer.name, '构图师');
+  });
+
+  // AI 补间
+  group = '端到端 · AI 补间';
+  console.log(`\n\x1b[38;5;213m▸ ${group}\x1b[0m`);
+  const twDoc = new Doc(16, 16);
+  twDoc.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 255 });
+  const twAnim = new Anim({ fps: 8 });
+  twAnim.capture(twDoc, true);
+  twAnim.duplicate(twDoc);
+  twDoc.activeLayer.buffer.clear({ r: 255, g: 255, b: 255, a: 255 });
+  twDoc.invalidate();
+  twAnim.capture(twDoc);
+  const twAgent = new Agent({
+    provider: null, renderer, doc: twDoc, history: new Hist(twDoc),
+    animation: twAnim, maxIterations: 1, visionLongEdge: 64,
+  });
+  let tweenRes = null;
+  try {
+    tweenRes = await twAgent.tween({ from: 0, to: 1, steps: 2, easing: 'linear', useAI: false, brief: '黑白渐变' });
+  } catch (err) { failures.push({ group, name: '程序化补间', err }); }
+  check('程序化补间插入交叉溶解中间帧', () => {
+    eq(tweenRes.inserted, 2);
+    eq(twAnim.length, 4);
+    eq(twAnim.frames[1].tween, true, '应标记 tween');
+    eq(twAnim.frames[1].easing, 'linear');
+    const mid = twAnim.frameBuffer(2).get(0, 0);
+    assert(mid.r > 10 && mid.r < 245, `中间帧应接近灰，实际 ${mid.r}`);
+  });
+  const twAnim2 = new Anim({ fps: 8 });
+  const twDoc2 = new Doc(16, 16);
+  twDoc2.activeLayer.buffer.clear({ r: 0, g: 0, b: 0, a: 255 });
+  twAnim2.capture(twDoc2, true);
+  twAnim2.duplicate(twDoc2);
+  twDoc2.activeLayer.buffer.clear({ r: 255, g: 255, b: 0, a: 255 });
+  twDoc2.invalidate();
+  twAnim2.capture(twDoc2);
+  const twAgent2 = new Agent({
+    provider: new DemoProvider({ width: 16, height: 16 }), renderer, doc: twDoc2,
+    history: new Hist(twDoc2), animation: twAnim2, maxIterations: 1, visionLongEdge: 64,
+  });
+  let aiTween = null;
+  try {
+    aiTween = await twAgent2.tween({ from: 0, to: 1, steps: 2, easing: 'easeInOutQuad', useAI: true, brief: '渐变补间' });
+  } catch (err) { failures.push({ group, name: 'AI 补间', err }); }
+  check('AI 补间（演示 Provider）也插入中间帧', () => {
+    assert(aiTween && aiTween.inserted >= 2, `应插入 >=2 帧，实际 ${aiTween && aiTween.inserted}`);
+    eq(twAnim2.length, 4);
+    assert(twAnim2.frames[1].tween, '应标记 tween');
   });
 
   await new Promise((r) => mock.close(r));

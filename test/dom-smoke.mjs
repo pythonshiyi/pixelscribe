@@ -647,6 +647,42 @@ ok('精灵表 / GIF / Aseprite 导出不抛异常', () => {
   app.exportAseprite();
 });
 
+ok('SVG 导出不抛异常', () => {
+  app.exportSVG();
+});
+
+ok('补间对话框可打开', () => {
+  while (app.animation.length < 2) app.animation.duplicate(app.doc);
+  app.tweenDialog();
+  assert($('#twFrom') && $('#twTo') && $('#twSteps') && $('#twEasing'), '缺少补间表单');
+  assert($('#twAI'), '缺少 AI 补间开关');
+  window.document.querySelector('#modalFoot .btn.ghost')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#modalBackdrop').hidden, '取消后模态应关闭');
+});
+
+try {
+  app.animation.capture(app.doc);
+  const n0 = app.animation.length;
+  await app.doTween({ from: 0, to: 1, steps: 2, easing: 'linear', useAI: false });
+  ok('程序化补间插入中间帧', () => {
+    eq(app.animation.length, n0 + 2, `帧数 ${app.animation.length}`);
+    assert(app.animation.frames.some((f) => f.tween), '应有 tween 标记帧');
+  });
+} catch (err) {
+  failures.push({ name: '补间', err });
+  console.log(`  \x1b[31m✗ 补间抛出\x1b[0m\n      ${err.stack}`);
+}
+
+ok('音频按钮与波形存在，未加载时隐藏', () => {
+  assert($('#btnFrameAudio') && $('#btnAudioAlign') && $('#audioWave'), '缺少音频控件');
+  eq($('#audioWave').hidden, true, '无音频时波形应隐藏');
+  assert(app.positionToFrame(0) >= 0, 'positionToFrame 应可用');
+});
+
+ok('多智能体复选框存在', () => {
+  assert($('#aiMulti'), '缺少多智能体开关');
+});
+
 /* ─────────── AI 闭环（演示模式） ─────────── */
 
 console.log('\n\x1b[38;5;213m▸ AI 面板（演示模式）\x1b[0m');

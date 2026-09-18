@@ -6,6 +6,7 @@ import { $, el, toast } from './dom.js';
 import { Provider } from '../ai/provider.js';
 import { DemoProvider } from '../ai/demo.js';
 import { Agent } from '../ai/agent.js';
+import { MultiAgent } from '../ai/multiagent.js';
 
 export class ChatPanel {
   /** @param {any} app */
@@ -94,27 +95,43 @@ export class ChatPanel {
 
     const provider = this.makeProvider();
     const isDemo = provider instanceof DemoProvider;
+    const multi = $('#aiMulti')?.checked === true;
 
-    this.agent = new Agent({
-      provider,
-      renderer: this.app.renderer,
-      doc: this.app.doc,
-      history: this.app.history,
-      maxIterations: Number($('#aiMaxIter').value) || 6,
-      visionLongEdge: this.app.config.visionLongEdge || 384,
-      incremental: $('#aiIncremental').checked,
-      vision: this.app.settings.vision ?? this.app.config.vision ?? 'auto',
-      maxTokens: this.app.settings.maxTokens ?? this.app.config.maxTokens ?? 2048,
-      visionDetail: this.app.settings.visionDetail ?? this.app.config.visionDetail ?? 'high',
-      plan: $('#aiPlan')?.checked === true,
-      neuralAvailable: Boolean(this.app.config.neuralRender),
-      neuralPrompt: brief,
-      frameCount,
-      animation: this.app.animation,
-      onEvent: (e) => this.onEvent(e, isDemo),
-    });
+    this.agent = multi
+      ? new MultiAgent({
+          provider,
+          renderer: this.app.renderer,
+          doc: this.app.doc,
+          history: this.app.history,
+          maxIterations: Number($('#aiMaxIter').value) || 6,
+          visionLongEdge: this.app.config.visionLongEdge || 384,
+          vision: this.app.settings.vision ?? this.app.config.vision ?? 'auto',
+          maxTokens: this.app.settings.maxTokens ?? this.app.config.maxTokens ?? 2048,
+          visionDetail: this.app.settings.visionDetail ?? this.app.config.visionDetail ?? 'high',
+          neuralAvailable: Boolean(this.app.config.neuralRender),
+          neuralPrompt: brief,
+          onEvent: (e) => this.onEvent(e, isDemo),
+        })
+      : new Agent({
+          provider,
+          renderer: this.app.renderer,
+          doc: this.app.doc,
+          history: this.app.history,
+          maxIterations: Number($('#aiMaxIter').value) || 6,
+          visionLongEdge: this.app.config.visionLongEdge || 384,
+          incremental: $('#aiIncremental').checked,
+          vision: this.app.settings.vision ?? this.app.config.vision ?? 'auto',
+          maxTokens: this.app.settings.maxTokens ?? this.app.config.maxTokens ?? 2048,
+          visionDetail: this.app.settings.visionDetail ?? this.app.config.visionDetail ?? 'high',
+          plan: $('#aiPlan')?.checked === true,
+          neuralAvailable: Boolean(this.app.config.neuralRender),
+          neuralPrompt: brief,
+          frameCount,
+          animation: this.app.animation,
+          onEvent: (e) => this.onEvent(e, isDemo),
+        });
 
-    this._liveCardLabel = '模型生成中';
+    this._liveCardLabel = multi ? '多智能体协作中' : '模型生成中';
     this._newLiveCard();
 
     try {
@@ -174,8 +191,9 @@ export class ChatPanel {
         this.setStatus(`帧 ${e.frame + 1}/${e.frameTotal} · 模型生成中…`, 'busy');
         break;
 
-      case 'phase':
-        this.setStatus({
+      case 'phase': {
+        const roleTag = e.role ? `${({ composer: '构图师', colorist: '上色师', reviewer: '审查师' }[e.role] || e.role)} · ` : '';
+        this.setStatus(roleTag + ({
           plan: `第 ${e.index + 1} 轮 · 模型规划中…`,
           execute: `第 ${e.index + 1} 轮 · 执行脚本…`,
           render: `第 ${e.index + 1} 轮 · 渲染回灌…`,
@@ -183,8 +201,9 @@ export class ChatPanel {
           converged: '已收敛，停止迭代',
           aborted: '已中止',
           done: '完成',
-        }[e.phase] || e.phase, e.phase === 'converged' || e.phase === 'done' ? 'ok' : 'busy');
+        }[e.phase] || e.phase), e.phase === 'converged' || e.phase === 'done' ? 'ok' : 'busy');
         break;
+      }
 
       case 'iteration':
         this.renderRound(e.iteration, e.total, isDemo);
@@ -198,6 +217,7 @@ export class ChatPanel {
       case 'done':
         this.setStatus(
           `${e.aborted ? '已中止' : '完成'} · ${e.rounds} 轮`
+          + (e.multi ? ' · 多智能体' : '')
           + (e.visionEnabled === false && !isDemo ? ' · 纯文本审查' : '')
           + (isDemo ? ' · 演示模式' : ''),
           e.aborted ? '' : 'ok',
@@ -222,6 +242,7 @@ export class ChatPanel {
     const backendLabel = it.render ? { neural: '神经渲染', procedural: '程序化', raster: '栅格' }[it.render.backend] : '';
     const head = el('div', { class: 'round-head' }, [
       el('span', { class: 'round-no', text: `#${it.index + 1}` }),
+      it.role ? el('span', { class: `round-role ${it.role}`, text: it.roleName || it.role }) : null,
       it.frameTotal > 1 ? el('span', { class: 'round-mode', text: `帧 ${it.frame + 1}/${it.frameTotal}` }) : null,
       el('span', { class: 'round-mode', text: it.mode === 'replace' ? '整幅' : '增量' }),
       el('span', { text: `改动 ${report.changed} px · ${report.ops} 条指令 · ${report.elapsedMs}ms` }),

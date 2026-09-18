@@ -47,6 +47,8 @@ function cloneFrame(frame) {
   return {
     width: frame.width,
     height: frame.height,
+    duration: frame.duration,
+    easing: frame.easing,
     layers: frame.layers.map((l) => ({ ...l, meta: l.meta ? { ...l.meta } : null, data: new Uint8ClampedArray(l.data) })),
   };
 }
@@ -55,6 +57,8 @@ function emptyFrameLike(frame) {
   return {
     width: frame.width,
     height: frame.height,
+    duration: frame.duration,
+    easing: frame.easing,
     layers: frame.layers.map((l) => ({ ...l, meta: l.meta ? { ...l.meta } : null, data: new Uint8ClampedArray(l.data.length) })),
   };
 }
@@ -78,10 +82,12 @@ export class Animation {
 
   /** 用当前文档快照覆盖/追加为当前帧。 */
   capture(doc, reset = false) {
+    const prev = !reset ? this.frames[this.current] : null;
     const frame = {
       width: doc.width,
       height: doc.height,
-      duration: this.frameDuration,
+      duration: prev?.duration ?? this.frameDuration,
+      easing: prev?.easing ?? 'linear',
       layers: doc.layers.map((l) => ({
         id: l.id,
         name: l.name,
@@ -258,6 +264,7 @@ export class Animation {
         width: f.width,
         height: f.height,
         duration: f.duration,
+        easing: f.easing,
         layers: f.layers.map((l) => ({
           id: l.id, name: l.name, kind: l.kind, meta: l.meta,
           visible: l.visible, opacity: l.opacity, locked: l.locked,
@@ -275,6 +282,7 @@ export class Animation {
       width: f.width,
       height: f.height,
       duration: f.duration || a.frameDuration,
+      easing: f.easing || 'linear',
       layers: (f.layers || []).map((l) => ({
         id: l.id, name: l.name, kind: l.kind || 'raster', meta: l.meta || null,
         visible: l.visible !== false, opacity: l.opacity == null ? 1 : l.opacity,

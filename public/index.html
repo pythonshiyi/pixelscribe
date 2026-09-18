@@ -136,9 +136,13 @@
         <button class="frame-btn" id="btnFrameDel" title="删除当前帧">🗑</button>
         <button class="frame-btn" id="btnFramePlay" title="播放 / 暂停">▶</button>
         <button class="frame-btn" id="btnFrameOnion" title="洋葱皮（前后帧半透明叠加）">◍</button>
+        <button class="frame-btn" id="btnFrameTween" title="补间（在关键帧之间生成中间帧）">⇢</button>
+        <button class="frame-btn" id="btnFrameAudio" title="导入音频（时间轴预览 / 拍点对齐）">♪</button>
+        <button class="frame-btn" id="btnAudioAlign" title="按音频拍点对齐帧时长" disabled>♩</button>
         <input class="frame-fps" id="frameFps" type="number" min="1" max="30" value="8" title="帧率 (fps)" />
       </div>
       <div class="frame-list" id="frameList"></div>
+      <canvas class="audio-wave" id="audioWave" width="132" height="26" title="音频波形与拍点" hidden></canvas>
     </div>
   </section>
 
@@ -169,6 +173,7 @@
           <div class="ai-controls">
             <label class="switch"><input type="checkbox" id="aiIncremental" checked /><span>增量迭代</span></label>
             <label class="switch"><input type="checkbox" id="aiPlan" /><span>导演模式</span></label>
+            <label class="switch" title="构图师 → 上色师 → 审查师 分工协作"><input type="checkbox" id="aiMulti" /><span>多智能体</span></label>
             <label class="mini-field"><span>轮次</span><input id="aiMaxIter" type="number" min="1" max="12" value="6" /></label>
             <label class="mini-field"><span>帧数</span><input id="aiFrames" type="number" min="1" max="24" value="1" title="生成 N 帧循环动画" /></label>
             <label class="mini-field"><span>画布</span>
@@ -318,6 +323,7 @@ outline c1"></textarea>
 </div>
 
 <input type="file" id="filePicker" accept=".png,.pxs,.txt,image/*" hidden />
+<input type="file" id="audioPicker" accept="audio/*,.mp3,.ogg,.wav,.m4a,.flac" hidden />
 <div class="toast-host" id="toastHost"></div>
 
 <script type="module" src="js/main.js"></script>

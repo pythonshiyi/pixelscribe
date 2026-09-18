@@ -29,6 +29,16 @@ import {
   cropBuffer, pasteBuffer, maskMapDataURL, clampRect, cropDataURL,
 } from '../core/backends.js';
 import { PixelBuffer } from '../core/buffer.js';
+import { PixelDocument, Layer } from '../core/document.js';
+import { blendFrames, blendBuffers } from '../core/tween.js';
+import { ease } from '../core/easing.js';
+
+/** AI 补间的系统提示词。 */
+const TWEEN_SYSTEM = `你是像素动画的补间画师（in-betweener）。
+你会收到同一段动作的三个画面：起始帧 A、结束帧 B、以及两帧的机械交叉溶解参考图。
+请在 A 的基础上，画出运动进度约 t 的中间帧：让角色的姿态/形变介于 A 与 B 之间，
+保持外形、配色、描边风格与 A 完全一致，只改变与运动相关的部分。
+只输出一个 \`\`\`pixelscript 代码块（增量指令，引擎会在 A 之上执行），不要解释。`;
 
 /**
  * @typedef {Object} AgentEvent
@@ -238,6 +248,139 @@ export class Agent {
     l.meta = { backend: 'procedural', task: 'inpaint', style: effStyle };
     this.doc.invalidate();
     return { backend: 'procedural', task: 'inpaint', rect };
+  }
+
+  /* ── v1.8：AI 补间 ─────────────────────────────────────────── */
+
+  /** 把动画里的某一帧还原为一个临时文档（用于在其上执行补间脚本）。 */
+  frameToDoc(frame) {
+    const doc = new PixelDocument(frame.width, frame.height);
+    doc.layers = frame.layers.map((fl) => {
+      const l = new Layer(frame.width, frame.height, fl.name);
+      l.id = fl.id;
+      l.kind = fl.kind || 'raster';
+      l.meta = fl.meta ? { ...fl.meta } : null;
+      l.visible = fl.visible !== false;
+      l.opacity = fl.opacity == null ? 1 : fl.opacity;
+      l.locked = Boolean(fl.locked);
+      l.buffer.data.set(fl.data);
+      return l;
+    });
+    doc.invalidate();
+    return doc;
+  }
+
+  /** 让模型补出 A→B 之间进度 t 的中间帧；失败返回 null（由调用方回退交叉溶解）。 */
+  async _aiIntermediateFrame(frameA, frameB, t, brief) {
+    if (!this.provider?.chat) return null;
+    const ca = this.frameToDoc(frameA).composite();
+    const cb = this.frameToDoc(frameB).composite();
+    const mix = blendBuffers(ca, cb, t);
+
+    const urlA = bufferDataURL(ca, 256);
+    const urlB = bufferDataURL(cb, 256);
+    const urlMix = bufferDataURL(mix, 256);
+    const messages = [
+      { role: 'system', content: TWEEN_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: `进度 t ≈ ${t.toFixed(2)}（0=A，1=B）。需求：${brief || '平滑运动中间帧'}。` },
+          { type: 'image_url', image_url: { url: urlA, detail: this.visionDetail } },
+          { type: 'image_url', image_url: { url: urlB, detail: this.visionDetail } },
+          { type: 'image_url', image_url: { url: urlMix, detail: this.visionDetail } },
+        ],
+      },
+    ];
+    let reply;
+    try {
+      reply = await this.provider.chat(messages, {
+        stream: false,
+        signal: this.controller?.signal,
+        maxTokens: this.maxTokens,
+      });
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ABORTED') throw err;
+      if (this.visionEnabled && isVisionError(err)) {
+        // 视觉不可用：仅用文字描述，交给程序化交叉溶解兜底
+        return null;
+      }
+      return null;
+    }
+    const script = extractScript(reply?.text || '');
+    if (!script) return null;
+    const scratch = this.frameToDoc(frameA);
+    const report = runScript(script, scratch, { mode: 'append', deferRender: true });
+    if (report.errors.length && report.changed === 0) return null;
+    if (scratch.width !== frameA.width || scratch.height !== frameA.height) return null;
+    return {
+      width: scratch.width,
+      height: scratch.height,
+      duration: frameA.duration,
+      easing: frameA.easing || 'linear',
+      tween: true,
+      t,
+      layers: scratch.layers.map((l) => ({
+        id: l.id,
+        name: l.name,
+        kind: l.kind || 'raster',
+        meta: l.meta ? { ...l.meta } : null,
+        visible: l.visible,
+        opacity: l.opacity,
+        locked: l.locked,
+        data: new Uint8ClampedArray(l.buffer.data),
+      })),
+    };
+  }
+
+  /**
+   * AI 补间：在动画的 from 帧与 to 帧之间插入 steps 张中间帧。
+   * 有可用模型时逐帧请求更合理的运动姿态，失败自动回退到交叉溶解。
+   * @param {{from?:number,to?:number,steps?:number,easing?:string,brief?:string,useAI?:boolean}} [opts]
+   * @returns {Promise<{inserted:number, at:number, easing:string}>}
+   */
+  async tween(opts = {}) {
+    if (!this.animation) throw new Error('缺少动画模型，无法补间');
+    const ownRun = !this.running;
+    if (ownRun) {
+      this.running = true;
+      this.controller = new AbortController();
+    }
+    try {
+      this.animation.capture(this.doc, false);
+      const len = this.animation.length;
+      const from = Math.max(0, Math.min(len - 1, opts.from ?? this.animation.current));
+      let to = Math.max(0, Math.min(len - 1, opts.to ?? from + 1));
+      if (to === from) to = Math.min(len - 1, from + 1);
+      const steps = Math.max(1, Math.min(64, opts.steps ?? 2));
+      const easing = opts.easing || 'easeInOutQuad';
+      const useAI = opts.useAI !== false && Boolean(this.provider?.chat);
+      const frameA = this.animation.frames[from];
+      const frameB = this.animation.frames[to];
+      if (!frameA || !frameB) return { inserted: 0, at: from + 1, easing };
+
+      this.emit({ type: 'phase', phase: 'tween', index: from });
+      const generated = [];
+      for (let i = 1; i <= steps; i++) {
+        if (this.controller.signal.aborted) break;
+        const t = ease(easing, i / (steps + 1));
+        let frame = null;
+        if (useAI) frame = await this._aiIntermediateFrame(frameA, frameB, t, opts.brief).catch(() => null);
+        if (!frame) frame = blendFrames(frameA, frameB, t);
+        frame.easing = easing;
+        generated.push(frame);
+        this.emit({ type: 'tween', step: i, steps, t, eased: t });
+      }
+      if (generated.length) {
+        this.animation.frames.splice(from + 1, 0, ...generated);
+        this.animation.current = from + 1;
+      }
+      const result = { inserted: generated.length, at: from + 1, easing };
+      this.emit({ type: 'tween', done: true, ...result });
+      return result;
+    } finally {
+      if (ownRun) this.running = false;
+    }
   }
 
   /** 编排：先处理局部重绘请求，再按风格做整幅渲染。 */

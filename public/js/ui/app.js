@@ -7,7 +7,11 @@ import { PixelDocument, Layer } from '../core/document.js';
 import { History } from '../core/history.js';
 import { Renderer } from '../core/renderer.js';
 import { Animation } from '../core/animation.js';
+import { insertTween } from '../core/tween.js';
+import { EASINGS, easingLabel } from '../core/easing.js';
+import { AudioTrack, frameDurationsForBeats } from '../core/audio.js';
 import { encodePNG } from '../io/png.js';
+import { encodeSVG } from '../io/svg.js';
 import { PixelBuffer } from '../core/buffer.js';
 import { Tools } from './tools.js';
 import { ChatPanel } from './chat.js';
@@ -49,6 +53,9 @@ export class App {
     this.animation = new Animation({ fps: 8 });
     this.playing = false;
     this._frameTimer = null;
+    this._audioRAF = 0;
+    /** 音频轨道（v1.8） */
+    this.audio = new AudioTrack();
     this._suppressCapture = false;
   }
 
@@ -272,6 +279,13 @@ export class App {
       e.target.value = String(this.animation.fps);
       if (this.playing) this.restartPlayTimer();
     });
+    $('#btnFrameTween')?.addEventListener('click', () => this.tweenDialog());
+    $('#btnFrameAudio')?.addEventListener('click', () => $('#audioPicker')?.click());
+    $('#audioPicker')?.addEventListener('change', (e) => {
+      this.importAudio(e.target.files?.[0]);
+      e.target.value = '';
+    });
+    $('#btnAudioAlign')?.addEventListener('click', () => this.alignToBeats());
   }
 
   selectFrame(i) {
@@ -294,27 +308,214 @@ export class App {
 
   restartPlayTimer() {
     clearInterval(this._frameTimer);
+    cancelAnimationFrame(this._audioRAF);
+    // 有音频时按音频时钟推进，画面与声音同步
+    if (this.audio?.loaded && this.audio.duration > 0) {
+      this.audio.play(0);
+      const tick = () => {
+        if (!this.playing) return;
+        const t = this.audio.currentTime;
+        if (t >= this.audio.duration - 0.01) { this.stopPlay(); return; }
+        this.applyFrameIndex(this.positionToFrame(t * 1000));
+        this._audioRAF = requestAnimationFrame(tick);
+      };
+      this._audioRAF = requestAnimationFrame(tick);
+      return;
+    }
     const ms = Math.max(33, 1000 / Math.max(1, this.animation.fps));
     this._frameTimer = setInterval(() => {
       const next = (this.animation.current + 1) % this.animation.length;
-      this._suppressCapture = true;
-      this.animation.applyTo(this.doc, next);
-      this.animation.current = next;
-      this._suppressCapture = false;
-      this.renderer.setDocument(this.doc);
-      this.updateOnion();
-      this.requestRender();
-      this.updateFrameHighlight();
-      this.updateStatus();
+      this.applyFrameIndex(next);
     }, ms);
+  }
+
+  /** 把某帧推入文档并刷新视图（播放用，不写回帧快照）。 */
+  applyFrameIndex(next) {
+    if (next === this.animation.current) return;
+    this._suppressCapture = true;
+    this.animation.applyTo(this.doc, next);
+    this.animation.current = next;
+    this._suppressCapture = false;
+    this.renderer.setDocument(this.doc);
+    this.updateOnion();
+    this.requestRender();
+    this.updateFrameHighlight();
+    this.updateStatus();
+  }
+
+  /** 由时间（毫秒）定位帧序号（按各帧 duration 累计）。 */
+  positionToFrame(ms) {
+    if (!this.animation.length) return 0;
+    const dur = (f) => f.duration || this.animation.frameDuration;
+    const total = this.animation.frames.reduce((s, f) => s + dur(f), 0);
+    if (total <= 0) return 0;
+    const pos = ((ms % total) + total) % total;
+    let acc = 0;
+    for (let i = 0; i < this.animation.length; i++) {
+      acc += dur(this.animation.frames[i]);
+      if (pos < acc) return i;
+    }
+    return this.animation.length - 1;
   }
 
   stopPlay() {
     this.playing = false;
     clearInterval(this._frameTimer);
     this._frameTimer = null;
+    cancelAnimationFrame(this._audioRAF);
+    this._audioRAF = 0;
+    this.audio?.pause();
     const b = $('#btnFramePlay');
     if (b) { b.classList.remove('on'); b.textContent = '▶'; }
+  }
+
+  /* ── 音频 / 时间轴（v1.8） ── */
+
+  async importAudio(file) {
+    if (!file) return;
+    try {
+      const track = new AudioTrack();
+      const ok = await track.load(file);
+      if (!ok) { this.warn('当前环境不支持音频解码'); return; }
+      this.audio?.dispose?.();
+      this.audio = track;
+      this.drawWaveform();
+      const align = $('#btnAudioAlign');
+      if (align) align.disabled = !(track.beats.length > 1);
+      toast(`音频已载入：${track.name}${track.bpm ? ` · 约 ${track.bpm} BPM` : ''}`, 'ok', 2600);
+      this.markDirty();
+    } catch (err) {
+      this.warn(`音频载入失败：${err.message}`);
+    }
+  }
+
+  drawWaveform() {
+    const c = $('#audioWave');
+    if (!c) return;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    const peaks = this.audio?.peaks;
+    if (!peaks) { c.hidden = true; return; }
+    c.hidden = false;
+    const { min, max, buckets } = peaks;
+    const w = c.width, h = c.height, mid = h / 2;
+    g.fillStyle = '#54d1ff';
+    for (let x = 0; x < w; x++) {
+      const b = Math.min(buckets - 1, Math.floor((x / w) * buckets));
+      const hi = max[b] || 0, lo = min[b] || 0;
+      const y0 = mid - hi * mid * 0.92;
+      const y1 = mid - lo * mid * 0.92;
+      g.fillRect(x, Math.min(y0, y1), 1, Math.max(1, Math.abs(y1 - y0)));
+    }
+    const dur = this.audio.duration || 1;
+    g.fillStyle = '#ff77a8';
+    for (const bt of this.audio.beats || []) {
+      const x = Math.round((bt / dur) * (w - 1));
+      g.fillRect(x, 0, 1, h);
+    }
+  }
+
+  alignToBeats() {
+    if (!this.audio?.beats?.length) { this.warn('未检测到拍点'); return; }
+    const durs = frameDurationsForBeats(this.animation.length, this.audio.duration * 1000, this.audio.beats);
+    this.animation.frames.forEach((f, i) => { f.duration = durs[i] || f.duration; });
+    const bpm = this.audio.bpm || Math.round(60000 / (durs[0] || 1000));
+    if (bpm > 0) this.animation.fps = Math.max(1, Math.min(30, Math.round(bpm / 4)));
+    const fps = $('#frameFps');
+    if (fps) fps.value = String(this.animation.fps);
+    this.markDirty();
+    this.updateStatus();
+    toast(`已按 ${this.audio.bpm || '?'} BPM 对齐 ${durs.length} 帧`, 'ok');
+  }
+
+  /* ── 补间（v1.8） ── */
+
+  tweenDialog() {
+    if (this.animation.length < 2) { this.warn('至少需要 2 帧才能补间'); return; }
+    const opts = (n) => Array.from({ length: n }, (_, i) => el('option', { value: String(i), text: `第 ${i + 1} 帧` }));
+    const from = this.animation.current;
+    const to = Math.min(this.animation.length - 1, from + 1);
+    const body = el('div', {}, [
+      el('p', { text: '在两张关键帧之间生成中间帧。程序化补间为确定性交叉溶解；AI 补间会请模型补出更合理的运动姿态。' }),
+      el('div', { class: 'grid2' }, [
+        el('label', { class: 'mini-field' }, [el('span', { text: '起始帧' }), el('select', { id: 'twFrom' }, opts(this.animation.length))]),
+        el('label', { class: 'mini-field' }, [el('span', { text: '结束帧' }), el('select', { id: 'twTo' }, opts(this.animation.length))]),
+      ]),
+      el('div', { class: 'grid2' }, [
+        el('label', { class: 'mini-field' }, [el('span', { text: '中间帧数' }), el('input', { type: 'number', id: 'twSteps', min: '1', max: '32', value: '3' })]),
+        el('label', { class: 'mini-field' }, [el('span', { text: '缓动' }), el('select', { id: 'twEasing' }, EASINGS.map((e) => el('option', { value: e.id, text: e.label })))]),
+      ]),
+      el('label', { class: 'switch' }, [el('input', { type: 'checkbox', id: 'twAI', checked: !this.config.demoMode }), el('span', { text: 'AI 补间（需模型）' })]),
+    ]);
+    setTimeout(() => {
+      const fs = $('#twFrom'); if (fs) fs.value = String(from);
+      const ts = $('#twTo'); if (ts) ts.value = String(to);
+      const es = $('#twEasing'); if (es) es.value = 'easeInOutQuad';
+    }, 0);
+    modal({
+      title: '补间',
+      body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        {
+          label: '生成',
+          kind: 'primary',
+          onClick: () => {
+            const o = {
+              from: Number($('#twFrom')?.value) || 0,
+              to: Number($('#twTo')?.value) || 1,
+              steps: Math.max(1, Math.min(32, Number($('#twSteps')?.value) || 3)),
+              easing: $('#twEasing')?.value || 'easeInOutQuad',
+              useAI: $('#twAI')?.checked === true,
+              brief: $('#aiBrief')?.value?.trim() || this.doc.title || '',
+            };
+            if (o.from === o.to) { this.warn('起始帧与结束帧不能相同'); return; }
+            this.doTween(o);
+          },
+        },
+      ],
+    });
+  }
+
+  async doTween(o) {
+    let result = null;
+    if (o.useAI) {
+      const provider = this.chat.makeProvider();
+      const agent = new Agent({
+        provider,
+        renderer: this.renderer,
+        doc: this.doc,
+        history: this.history,
+        animation: this.animation,
+        neuralAvailable: Boolean(this.config.neuralRender),
+        visionLongEdge: this.config.visionLongEdge || 384,
+        visionDetail: this.settings.visionDetail ?? this.config.visionDetail ?? 'high',
+        vision: this.settings.vision ?? this.config.vision ?? 'auto',
+        maxTokens: this.settings.maxTokens ?? this.config.maxTokens ?? 2048,
+        neuralPrompt: o.brief,
+      });
+      this.chat.setStatus('AI 补间中…', 'busy');
+      this.chat.disabled(true);
+      try {
+        result = await agent.tween({ ...o, useAI: true });
+        toast(`已生成 ${result.inserted} 张 AI 补间帧（${easingLabel(o.easing)}）`, 'ok');
+      } catch (err) {
+        result = insertTween(this.animation, o);
+        toast(`AI 补间失败（${err.message}），已用程序化补间`, 'warn', 3200);
+      } finally {
+        this.chat.disabled(false);
+        this.chat.setStatus('就绪', '');
+      }
+    } else {
+      result = insertTween(this.animation, o);
+      toast(`已插入 ${result.inserted} 张补间帧（${easingLabel(o.easing)}）`, 'ok');
+    }
+    if (result?.inserted) {
+      this.animation.current = result.at - 1; // 让 select 的 capture 写回起始帧
+      this.selectFrame(result.at);
+    }
+    this.afterEdit(true);
+    this.syncFrames();
   }
 
   syncFrames() {
@@ -737,6 +938,7 @@ export class App {
         { label: '精灵表 PNG', kind: 'ghost', onClick: () => this.exportSpriteSheet() },
         { label: 'GIF', kind: 'ghost', onClick: () => this.exportGIF() },
         { label: 'Aseprite', kind: 'ghost', onClick: () => this.exportAseprite() },
+        { label: 'SVG', kind: 'ghost', onClick: () => this.exportSVG() },
         {
           label: '导出 PNG',
           kind: 'primary',
@@ -785,6 +987,17 @@ export class App {
     const code = this.scriptPanel.getValue().trim();
     downloadText(`${this.doc.title || 'pixelscribe'}.pxs`, code || '# 空脚本\n', 'text/plain');
     toast('脚本已导出', 'ok');
+  }
+
+  /** 导出 SVG（矢量分支后端）：像素游程合并为 path。 */
+  exportSVG() {
+    const scale = 4;
+    const svg = encodeSVG(this.doc.composite().data, this.doc.width, this.doc.height, {
+      scale,
+      title: this.doc.title || 'pixelscribe',
+    });
+    downloadText(`${this.doc.title || 'pixelscribe'}.svg`, svg, 'image/svg+xml');
+    toast(`已导出 SVG（${this.doc.width * scale}×${this.doc.height * scale} 矢量）`, 'ok');
   }
 
   settingsDialog() {
@@ -970,6 +1183,7 @@ export class App {
       script: this.scriptPanel?.getValue() ?? '',
       camera: { scale: this.renderer.scale, offsetX: this.renderer.offsetX, offsetY: this.renderer.offsetY },
       animation: this.animation?.toJSON(),
+      audio: this.audio?.loaded || this.audio?.peaks ? this.audio.toJSON() : null,
     };
     const json = JSON.stringify(payload);
     // 小文档同步写 localStorage（兼容旧路径、关页即存）；大文档/超配额则依赖 IndexedDB
@@ -990,6 +1204,14 @@ export class App {
       if (payload.animation) {
         try { this.animation = Animation.fromJSON(payload.animation); } catch { /* 忽略损坏的动画数据 */ }
         if (this.animation?.frames?.length) $('#frameFps') && ($('#frameFps').value = String(this.animation.fps));
+      }
+      if (payload.audio) {
+        try {
+          this.audio = AudioTrack.fromJSON(payload.audio);
+          this.drawWaveform();
+          const align = $('#btnAudioAlign');
+          if (align) align.disabled = !(this.audio.beats.length > 1);
+        } catch { /* 忽略损坏的音频元数据 */ }
       }
       this.history = new History(doc, 120);
       this.renderer.setDocument(doc);
