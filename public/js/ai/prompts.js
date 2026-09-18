@@ -57,8 +57,11 @@ ${dslReference()}
 7. **渐变用 graddither**：天空/光照过渡用 graddither X Y W H C1 C2 bayer v，比 grad 更有像素质感。
 8. **有机曲线用 curve / arc**：叶形、毛发、飘带用 curve，圆角高光用 arc（角度制）。
 9. 高光用 adjust 提亮或直接用小面积浅色；圆/椭圆半径取画布尺寸的 1/4 ~ 1/3 通常比较好看。
-10. 所有绘制坐标必须在 0 … ${docInfo.width - 1} / 0 … ${docInfo.height - 1} 范围内。
-11. **大画布用百分比坐标**：坐标与尺寸可写 50% 或 25%（x 按画布宽、y 按高、半径按长边换算），
+10. **径向光照/球体**用 radial CX CY R0 R1 C1 C2 —— 光晕、焦点、立体明暗比 grad 更有体积。
+11. **纹理图案**用 pattern X Y W H checker|stripes|dots|crosshatch|grid|bricks|zigzag|noise [COLOR] [SCALE]。
+12. **调色**用 map X Y W H invert|gray|sepia|posterize|threshold|brighten|darken|saturate|channel —— 如 map 0 0 100% 100% gray 1 去饱和、map 0 0 100% 100% posterize 4 做色阶。
+13. 所有绘制坐标必须在 0 … ${docInfo.width - 1} / 0 … ${docInfo.height - 1} 范围内。
+14. **大画布用百分比坐标**：坐标与尺寸可写 50% 或 25%（x 按画布宽、y 按高、半径按长边换算），
     例如 ellipse 50% 55% 30% 22% c9 fill。画布越大越推荐用百分比，避免大数字算错。
 
 # 写实/进阶管线（当风格不是 pixel 时）

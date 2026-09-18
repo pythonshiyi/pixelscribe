@@ -842,3 +842,10 @@ kbd {
   color: #ffe066; background: rgba(0, 0, 0, .45); border-radius: 3px; padding: 0 2px;
 }
 .audio-wave { cursor: crosshair; }
+/* 风格预设行（v2.3） */
+.preset-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px;
+}
+.preset-row b { flex: 0 0 auto; }
+.preset-row .hint { flex: 1; font-size: 11px; color: var(--fg-2); }

@@ -17,7 +17,7 @@ import { Palette, PRESETS } from '../public/js/core/palette.js';
 import {
   PixelBuffer, drawLine, fillEllipse, strokeEllipse, drawRRect, fillPoly,
   floodFill, outline, dither, noise, linearGrad, flipBuffer, rotateBuffer,
-  symmetryTransforms, mulberry32,
+  symmetryTransforms, mulberry32, radialGrad, patternFill, PATTERNS, colorMap,
 } from '../public/js/core/buffer.js';
 import { PixelDocument, Layer } from '../public/js/core/document.js';
 import { History } from '../public/js/core/history.js';
@@ -61,6 +61,9 @@ import {
   scaleRegion, offsetRegion,
 } from '../public/js/core/selection.js';
 import { canRecordWebM, pickMimeType, recordWebM } from '../public/js/io/recorder.js';
+import {
+  STYLE_PRESETS as STYLE_LIBRARY, getStylePreset, applyStylePreset, serializeStylePreset, parseStylePreset,
+} from '../public/js/core/presets.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, '..', 'out', 'test');
@@ -473,8 +476,8 @@ describe('PixelScript 词法', () => {
     eq(t[1].value, 'A "B"');
   });
 
-  it('指令表规模符合文档（43 条：33 绘制 + 9 渲染 + 1 局部重绘）', () => {
-    eq(Object.keys(COMMANDS).length, 43);
+  it('指令表规模符合文档（46 条：33 绘制 + 9 渲染 + 1 局部重绘 + 3 v2.3 扩展）', () => {
+    eq(Object.keys(COMMANDS).length, 46);
   });
 
   it('dslReference 列出全部指令', () => {
@@ -2381,6 +2384,224 @@ describe('WebM 录像', () => {
     win.MediaRecorder.isTypeSupported = () => true;
     eq(canRecordWebM(win), true);
     eq(pickMimeType(win), 'video/webm;codecs=vp9,opus');
+  });
+});
+
+/* ─────────── 12.23 DSL 扩展：radial / pattern / map（v2.3） ─────────── */
+
+describe('radialGrad 径向渐变', () => {
+  it('中心为 C1、边缘为 C2', () => {
+    const b = new PixelBuffer(16, 16);
+    radialGrad(b, 8, 8, 0, 8, { r: 255, g: 0, b: 0, a: 255 }, { r: 0, g: 0, b: 255, a: 255 }, 1);
+    eq(b.get(8, 8).r, 255, '中心应接近 C1');
+    const far = b.get(15, 8);
+    assert(far.b > far.r, `边缘应偏 C2，实际 ${JSON.stringify(far)}`);
+  });
+
+  it('power 改变过渡曲线', () => {
+    const a = new PixelBuffer(16, 16);
+    const b = new PixelBuffer(16, 16);
+    radialGrad(a, 8, 8, 0, 8, { r: 255, g: 0, b: 0, a: 255 }, { r: 0, g: 0, b: 0, a: 255 }, 1);
+    radialGrad(b, 8, 8, 0, 8, { r: 255, g: 0, b: 0, a: 255 }, { r: 0, g: 0, b: 0, a: 255 }, 2);
+    assert(a.get(12, 8).r !== b.get(12, 8).r, '不同 power 应产生不同值');
+  });
+});
+
+describe('patternFill 图案填充', () => {
+  it('checker 交替且同参数确定', () => {
+    const a = new PixelBuffer(8, 8);
+    const b = new PixelBuffer(8, 8);
+    const c = { r: 255, g: 255, b: 255, a: 255 };
+    patternFill(a, 0, 0, 8, 8, c, 'checker', 1);
+    patternFill(b, 0, 0, 8, 8, c, 'checker', 1);
+    eq(a.diffCount(b), 0, '同参数应确定');
+    assert(a.opaqueCount() > 20 && a.opaqueCount() < 44, `密度异常 ${a.opaqueCount()}`);
+  });
+
+  it('不同图案生成不同结果', () => {
+    const c = { r: 255, g: 255, b: 255, a: 255 };
+    const a = new PixelBuffer(8, 8);
+    const b = new PixelBuffer(8, 8);
+    patternFill(a, 0, 0, 8, 8, c, 'grid', 1);
+    patternFill(b, 0, 0, 8, 8, c, 'stripes', 1);
+    assert(a.diffCount(b) > 0, '不同图案应不同');
+  });
+
+  it('scale 放大图案', () => {
+    const b = new PixelBuffer(16, 16);
+    patternFill(b, 0, 0, 16, 16, { r: 255, g: 255, b: 255, a: 255 }, 'checker', 4);
+    eq(b.get(0, 0).a, 255);
+    eq(b.get(0, 4).a, 0, '放大后应成 4×4 块交替');
+  });
+
+  it('PATTERNS 含全部内置图案', () => {
+    for (const k of ['checker', 'stripes', 'dots', 'crosshatch', 'grid', 'bricks', 'zigzag', 'noise']) {
+      assert(PATTERNS[k], `缺少图案 ${k}`);
+    }
+  });
+});
+
+describe('colorMap 颜色映射', () => {
+  it('invert 取反', () => {
+    const b = new PixelBuffer(2, 2);
+    b.clear({ r: 10, g: 20, b: 30, a: 255 });
+    colorMap(b, 0, 0, 2, 2, 'invert');
+    eq(b.get(0, 0).r, 245);
+    eq(b.get(0, 0).b, 225);
+  });
+
+  it('gray 去饱和', () => {
+    const b = new PixelBuffer(2, 2);
+    b.clear({ r: 255, g: 0, b: 0, a: 255 });
+    colorMap(b, 0, 0, 2, 2, 'gray', 1);
+    const c = b.get(0, 0);
+    eq(c.r, c.g, '灰度后 RGB 应相等');
+    eq(c.g, c.b);
+  });
+
+  it('threshold 二值化', () => {
+    const b = new PixelBuffer(2, 1);
+    b.set(0, 0, { r: 10, g: 10, b: 10, a: 255 });
+    b.set(1, 0, { r: 250, g: 250, b: 250, a: 255 });
+    colorMap(b, 0, 0, 2, 1, 'threshold', 0.5);
+    eq(b.get(0, 0).r, 0);
+    eq(b.get(1, 0).r, 255);
+  });
+
+  it('posterize 量化到 N 级', () => {
+    const b = new PixelBuffer(2, 2);
+    b.clear({ r: 128, g: 128, b: 128, a: 255 });
+    colorMap(b, 0, 0, 2, 2, 'posterize', 2);
+    assert([0, 255].includes(b.get(0, 0).r), `应量化为极值，实际 ${b.get(0, 0).r}`);
+  });
+
+  it('透明像素不被处理', () => {
+    const b = new PixelBuffer(2, 1);
+    b.set(0, 0, { r: 0, g: 0, b: 0, a: 0 });
+    colorMap(b, 0, 0, 2, 1, 'invert');
+    eq(b.get(0, 0).a, 0, '透明应保持');
+  });
+
+  it('channel 把某通道值写入另一通道', () => {
+    const b = new PixelBuffer(2, 2);
+    b.clear({ r: 200, g: 0, b: 0, a: 255 });
+    colorMap(b, 0, 0, 2, 2, 'channel', 1, { from: 'r', to: 'g' });
+    eq(b.get(0, 0).g, 200, 'g 应取 r 的值');
+  });
+});
+
+describe('DSL 新指令（radial/pattern/map）', () => {
+  it('radial 执行成功', () => {
+    const d = new PixelDocument(16, 16);
+    const r = runScript('radial 8 8 0 8 c7 c0', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    assert(d.activeLayer.buffer.opaqueCount() > 50);
+  });
+
+  it('pattern 执行成功、未知图案报错', () => {
+    const d = new PixelDocument(16, 16);
+    let r = runScript('pattern 0 0 16 16 checker c8 2', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('pattern 0 0 16 16 nope c8', d, { mode: 'replace' });
+    eq(r.ok, false);
+    assert(r.errors[0].includes('line 1'), r.errors[0]);
+  });
+
+  it('map 执行成功、channel 参数校验', () => {
+    const d = new PixelDocument(16, 16);
+    let r = runScript('bg c8\nmap 0 0 16 16 gray 1', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    r = runScript('map 0 0 16 16 channel 1 z>q', d);
+    eq(r.ok, false);
+  });
+
+  it('radial/pattern/map 支持百分比坐标', () => {
+    const d = new PixelDocument(100, 100);
+    const r = runScript('radial 50% 50% 0 40% c7 c0\npattern 0% 0% 100% 50% dots c8\nmap 0 0 100% 100% invert', d, { mode: 'replace' });
+    assert(r.ok, r.errors.join(';'));
+    assert(r.changed > 100, `改动过少 ${r.changed}`);
+  });
+
+  it('指令表扩展且文档字符串完整', () => {
+    for (const k of ['radial', 'pattern', 'map']) {
+      assert(COMMANDS[k], `缺少指令 ${k}`);
+      assert(COMMANDS[k].doc && COMMANDS[k].doc.includes(k), `${k} 文档缺失`);
+    }
+  });
+});
+
+/* ─────────── 12.24 k-means 配色（v2.3） ─────────── */
+
+describe('k-means 配色', () => {
+  it('提取指定数量且确定', () => {
+    const b = new PixelBuffer(32, 32);
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
+      b.set(x, y, x < 16 ? { r: 255, g: 0, b: 0, a: 255 } : { r: 0, g: 0, b: 255, a: 255 });
+    }
+    const k1 = Palette.kmeans(b, { k: 2, seed: 7 });
+    const k2 = Palette.kmeans(b, { k: 2, seed: 7 });
+    eq(k1.length, 2);
+    deepEq(k1, k2, '同 seed 应确定');
+    const hasRed = k1.some((c) => c.r > 200);
+    const hasBlue = k1.some((c) => c.b > 200);
+    assert(hasRed && hasBlue, `应识别红蓝两簇：${JSON.stringify(k1)}`);
+  });
+
+  it('颜色数少于 k 时原样返回', () => {
+    const b = new PixelBuffer(4, 4);
+    b.clear({ r: 1, g: 2, b: 3, a: 255 });
+    const c = Palette.kmeans(b, { k: 8 });
+    eq(c.length, 1);
+  });
+
+  it('空图像返回空数组', () => {
+    const b = new PixelBuffer(4, 4);
+    eq(Palette.kmeans(b, { k: 4 }).length, 0);
+  });
+});
+
+/* ─────────── 12.25 风格预设（v2.3） ─────────── */
+
+describe('风格预设', () => {
+  it('内置预设齐全且字段完整', () => {
+    assert(STYLE_LIBRARY.length >= 6, `预设过少 ${STYLE_LIBRARY.length}`);
+    for (const p of STYLE_LIBRARY) {
+      assert(p.id && p.name && p.style, `预设字段缺失：${JSON.stringify(p)}`);
+    }
+    assert(getStylePreset('photo'), '应能按 id 取到');
+    eq(getStylePreset('nope'), null);
+  });
+
+  it('applyStylePreset 切换风格并执行脚本', () => {
+    const d = new PixelDocument(32, 32);
+    runScript('bg c1\ncircle 16 16 10 c9 fill', d, { mode: 'replace' });
+    const r = applyStylePreset(d, 'painting', { applyScript: true });
+    assert(r.ok, '应用失败');
+    eq(d.style, 'painting');
+    assert(r.report, '应返回脚本报告');
+    assert(Array.isArray(d.lights), '渲染脚本应声明光照');
+  });
+
+  it('applyScript:false 时只切风格', () => {
+    const d = new PixelDocument(16, 16);
+    const before = d.activeLayer.buffer.opaqueCount();
+    applyStylePreset(d, 'ink', { applyScript: false });
+    eq(d.style, 'ink');
+    eq(d.activeLayer.buffer.opaqueCount(), before, '不应绘制');
+  });
+
+  it('序列化 / 解析往返', () => {
+    const p = STYLE_LIBRARY[2];
+    const back = parseStylePreset(serializeStylePreset(p));
+    eq(back.name, p.name);
+    eq(back.style, p.style);
+    eq(back.script, p.script);
+  });
+
+  it('非法 JSON 抛出错误', () => {
+    let threw = false;
+    try { parseStylePreset('{"style":"x"}'); } catch { threw = true; }
+    assert(threw, '缺少 name 应抛错');
   });
 });
 

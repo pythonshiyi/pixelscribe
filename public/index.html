@@ -222,6 +222,13 @@
                 <option value="photo">写实照片</option>
               </select>
             </label>
+            <label class="mini-field"><span>预设</span>
+              <select id="aiPreset" title="风格预设（一键套用风格 + 渲染指令）">
+                <option value="">— 无 —</option>
+              </select>
+            </label>
+            <button class="btn small ghost" id="btnSavePreset" title="把当前风格与脚本存为预设">存为预设</button>
+            <button class="btn small ghost" id="btnManagePresets" title="管理自定义预设">管理</button>
           </div>
           <div class="ai-actions">
             <button class="btn primary" id="btnGenerate"><svg><use href="#i-wand"/></svg><span>开始生成</span></button>
@@ -289,7 +296,8 @@ outline c1"></textarea>
             <option value="bw">黑白（2 色）</option>
           </select>
           <div class="flex-spacer"></div>
-          <button class="btn small ghost" id="btnExtract2" title="从图像提取"><svg><use href="#i-image"/></svg></button>
+          <button class="btn small ghost" id="btnKmeans" title="k-means 量化提取配色">k-means</button>
+          <button class="btn small ghost" id="btnExtract2" title="从图像提取（按频次）"><svg><use href="#i-image"/></svg></button>
         </div>
         <div class="swatches" id="swatchGrid"></div>
         <div class="palette-editor" id="paletteEditor">

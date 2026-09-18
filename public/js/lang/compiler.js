@@ -13,7 +13,7 @@ import {
   drawLine, fillEllipse, strokeEllipse, drawRRect, fillPoly, floodFill,
   outline as outlineOp, dither as ditherOp, noise as noiseOp, linearGrad,
   flipBuffer, rotateBuffer, symmetryTransforms, mulberry32,
-  drawBezier, arcPoints, ditherGradient,
+  drawBezier, arcPoints, ditherGradient, radialGrad, patternFill, PATTERNS, colorMap,
 } from '../core/buffer.js';
 import { parseColor, adjust as adjustColor, mix } from '../util/color.js';
 import { Palette } from '../core/palette.js';
@@ -820,6 +820,60 @@ export const COMMANDS = {
       return { structural: true };
     },
   },
+
+  /* ── v2.3 扩展：径向渐变 / 图案填充 / 通道映射 ── */
+
+  radial: {
+    min: 6, max: 7,
+    doc: 'radial CX CY R0 R1 C1 C2 [POWER] —— 径向渐变（光照光晕、焦点、球体明暗，比 grad 更有体积）',
+    run(ctx, a) {
+      const cx = Math.round(num(a[0])), cy = Math.round(num(a[1]));
+      const r0 = Math.max(0, num(a[2])), r1 = Math.max(0, num(a[3]));
+      const c1 = color(a[4], ctx.palette), c2 = color(a[5], ctx.palette);
+      const power = numOr(a[6], 1);
+      radialGrad(ctx.buf, cx, cy, Math.min(r0, r1), Math.max(r0, r1), r0 <= r1 ? c1 : c2, r0 <= r1 ? c2 : c1, power);
+    },
+  },
+
+  pattern: {
+    min: 5, max: 7,
+    doc: 'pattern X Y W H checker|stripes|dots|crosshatch|grid|bricks|zigzag|noise [COLOR] [SCALE] —— 图案填充（8×8 平铺）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const kind = String(a[4].value).toLowerCase();
+      if (!PATTERNS[kind]) throw new PxError(`未知图案 '${kind}'，可选：${Object.keys(PATTERNS).join(' / ')}`);
+      const c = a[5] ? color(a[5], ctx.palette) : parseColor('c7', ctx.palette);
+      const scale = Math.max(1, Math.round(numOr(a[6], 1)));
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        patternFill(ctx.buf, q.x, q.y, q.w, q.h, c, kind, scale);
+      });
+    },
+  },
+
+  map: {
+    min: 5, max: 7,
+    doc: 'map X Y W H invert|gray|sepia|posterize|threshold|brighten|darken|saturate|channel [AMOUNT] [FROM>TO] —— 颜色映射/调色（channel 模式如 r>g）',
+    run(ctx, a) {
+      const r = normRect(Math.round(num(a[0])), Math.round(num(a[1])), Math.round(num(a[2])), Math.round(num(a[3])));
+      const kind = String(a[4].value).toLowerCase();
+      const allowed = ['invert', 'gray', 'grayscale', 'sepia', 'posterize', 'posterise', 'threshold', 'brighten', 'darken', 'saturate', 'channel'];
+      if (!allowed.includes(kind)) throw new PxError(`未知映射 '${kind}'，可选：${allowed.join(' / ')}`);
+      const k = kind === 'grayscale' ? 'gray' : kind === 'posterise' ? 'posterize' : kind;
+      const amount = numOr(a[5], 1);
+      const extra = {};
+      if (k === 'channel') {
+        const spec = a[6] ? String(a[6].value) : 'r>g';
+        const [from, to] = spec.split(/[>:]/).map((s) => s.trim().toLowerCase());
+        if (!'rgba'.includes(from) || !'rgba'.includes(to)) throw new PxError(`channel 参数格式应为 r>g 之类，收到 '${spec}'`);
+        extra.from = from; extra.to = to; extra.mix = numOr(a[5], 1);
+      }
+      eachMirror(ctx, (t) => {
+        const q = xformRect(t, r.x, r.y, r.w, r.h);
+        colorMap(ctx.buf, q.x, q.y, q.w, q.h, k, amount, extra);
+      });
+    },
+  },
 };
 
 /* ───────────────────────── 百分比坐标 ───────────────────────── */
@@ -853,6 +907,9 @@ const AXES = {
   graddither: ['x', 'y', 'x', 'y'],
   fbm: ['x', 'y', 'x', 'y'],
   inpaint: ['x', 'y', 'x', 'y'],
+  radial: ['x', 'y', 'd', 'd'],
+  pattern: ['x', 'y', 'x', 'y'],
+  map: ['x', 'y', 'x', 'y'],
 };
 
 const POLY_MODES = new Set(['stroke', 'outline', 'fill', 'solid']);

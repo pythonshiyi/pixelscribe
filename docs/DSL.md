@@ -164,6 +164,9 @@ rect 4 4 10 10 c8 fill         # 显式填充
 | 41 | `fbm` | `fbm X Y W H C1 C2 [OCTAVES] [SCALE] [fill\|over\|mod]` |
 | 42 | `render` | `render [STYLE]` |
 | 43 | `inpaint` | `inpaint X Y W H "PROMPT" [STRENGTH]` |
+| 44 | `radial` | `radial CX CY R0 R1 C1 C2 [POWER]` |
+| 45 | `pattern` | `pattern X Y W H checker\|stripes\|dots\|crosshatch\|grid\|bricks\|zigzag\|noise [COLOR] [SCALE]` |
+| 46 | `map` | `map X Y W H invert\|gray\|sepia\|posterize\|threshold\|brighten\|darken\|saturate\|channel [AMOUNT] [FROM>TO]` |
 
 ---
 
@@ -408,6 +411,38 @@ bevel 2 2 12 12 2 0.35
 比 `grad` 更有像素质感（不产生连续色带）。
 ```
 graddither 0 0 64 32 c12 c7 bayer v
+```
+
+### 4.3.1 v2.3 扩展：径向 / 图案 / 通道映射
+
+#### `radial CX CY R0 R1 C1 C2 [POWER]`
+**径向渐变**：以 `(CX,CY)` 为中心，半径 `R0→R1` 由 `C1` 过渡到 `C2`。
+`POWER` 控制曲线（1 线性，>1 更集中，<1 更均匀）。适合光晕、焦点、球体明暗。
+```
+radial 32 32 0 28 c7 c1 1.5
+```
+
+#### `pattern X Y W H KIND [COLOR] [SCALE]`
+**图案填充**：用 8×8 位图图案在矩形内平铺，`KIND` 取
+`checker / stripes / dots / crosshatch / grid / bricks / zigzag / noise`，
+`SCALE` 为放大倍数（默认 1）。`COLOR` 省略时默认 `c7`。
+```
+pattern 0 0 64 64 bricks c4 2
+pattern 0 0 64 16 checker c8
+```
+
+#### `map X Y W H KIND [AMOUNT] [FROM>TO]`
+**颜色映射 / 调色**：对区域内像素做变换。`KIND` 取：
+- `invert` 反相、`gray` 去饱和（`AMOUNT` 混合度）、`sepia` 怀旧、
+- `posterize` 色阶量化（`AMOUNT` = 级数）、`threshold` 二值化（`AMOUNT` = 阈值 0..1）、
+- `brighten` / `darken` / `saturate`（`AMOUNT` = 强度）、
+- `channel` 通道搬运，需写 `FROM>TO`（如 `r>g`，`AMOUNT` = 混合度）。
+
+透明像素不会被处理。
+```
+map 0 0 100% 100% gray 0.6
+map 0 0 100% 100% posterize 4
+map 0 0 100% 100% channel 1 r>g
 ```
 
 ### 4.4 程序化渲染扩展（v1.3：从像素画到写实）

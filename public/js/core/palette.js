@@ -159,6 +159,107 @@ export class Palette {
         r: u & 0xff, g: (u >>> 8) & 0xff, b: (u >>> 16) & 0xff, a: (u >>> 24) & 0xff,
       }));
   }
+
+  /**
+   * k-means 量化提取代表性配色（v2.3）。
+   * 先做 RGB 直方图抽样，再用 k-means++ 初始化 + Lloyd 迭代聚类，
+   * 结果按簇内像素数降序返回。确定性（固定 seed）。
+   * @param {import('./buffer.js').PixelBuffer} buffer
+   * @param {{k?:number, seed?:number, includeTransparent?:boolean, maxSamples?:number}} [opts]
+   * @returns {RGBA[]}
+   */
+  static kmeans(buffer, opts = {}) {
+    const k = Math.max(2, Math.min(64, Math.round(opts.k || 16)));
+    const includeTransparent = opts.includeTransparent === true;
+    const data = buffer.data;
+    const samples = [];
+    // 先统计直方图并按频次取前 maxSamples 色作为样本（加速且抑制噪声）
+    const counts = new Map();
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      if (a === 0 && !includeTransparent) continue;
+      const key = (a << 24) | (data[i + 2] << 16) | (data[i + 1] << 8) | data[i];
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const maxSamples = Math.max(k * 4, Math.min(4096, Math.round(opts.maxSamples || 1024)));
+    const entries = [...counts.entries()].sort((x, y) => y[1] - x[1]).slice(0, maxSamples);
+    for (const [u, w] of entries) {
+      samples.push({
+        r: u & 0xff, g: (u >>> 8) & 0xff, b: (u >>> 16) & 0xff, a: (u >>> 24) & 0xff, w,
+      });
+    }
+    if (!samples.length) return [];
+    if (samples.length <= k) return samples.map(({ r, g, b, a }) => ({ r, g, b, a }));
+
+    const rand = mulberry32l((opts.seed ?? 1) >>> 0);
+    // k-means++ 初始化
+    const centers = [samples[Math.floor(rand() * samples.length)]];
+    while (centers.length < k) {
+      const d2 = samples.map((s) => {
+        let best = Infinity;
+        for (const c of centers) {
+          const d = (s.r - c.r) ** 2 + (s.g - c.g) ** 2 + (s.b - c.b) ** 2;
+          if (d < best) best = d;
+        }
+        return best * s.w;
+      });
+      const total = d2.reduce((a, b) => a + b, 0);
+      if (total <= 0) break;
+      let r = rand() * total;
+      let idx = 0;
+      while (idx < d2.length && (r -= d2[idx]) > 0) idx++;
+      centers.push(samples[Math.min(idx, samples.length - 1)]);
+    }
+
+    // Lloyd 迭代
+    const kk = centers.length;
+    for (let iter = 0; iter < 12; iter++) {
+      const sums = Array.from({ length: kk }, () => ({ r: 0, g: 0, b: 0, a: 0, w: 0 }));
+      for (const s of samples) {
+        let bi = 0, bd = Infinity;
+        for (let i = 0; i < kk; i++) {
+          const c = centers[i];
+          const d = (s.r - c.r) ** 2 + (s.g - c.g) ** 2 + (s.b - c.b) ** 2;
+          if (d < bd) { bd = d; bi = i; }
+        }
+        const acc = sums[bi];
+        acc.r += s.r * s.w; acc.g += s.g * s.w; acc.b += s.b * s.w; acc.a += s.a * s.w; acc.w += s.w;
+      }
+      let moved = 0;
+      for (let i = 0; i < kk; i++) {
+        if (!sums[i].w) continue;
+        const nr = sums[i].r / sums[i].w, ng = sums[i].g / sums[i].w, nb = sums[i].b / sums[i].w, na = sums[i].a / sums[i].w;
+        moved += Math.abs(nr - centers[i].r) + Math.abs(ng - centers[i].g) + Math.abs(nb - centers[i].b);
+        centers[i] = { r: Math.round(nr), g: Math.round(ng), b: Math.round(nb), a: Math.round(na) };
+      }
+      if (moved < 0.5) break;
+    }
+    // 按簇权重排序
+    const weighted = centers.map((c, i) => {
+      let w = 0;
+      for (const s of samples) {
+        let bi = 0, bd = Infinity;
+        for (let j = 0; j < kk; j++) {
+          const cc = centers[j];
+          const d = (s.r - cc.r) ** 2 + (s.g - cc.g) ** 2 + (s.b - cc.b) ** 2;
+          if (d < bd) { bd = d; bi = j; }
+        }
+        if (bi === i) w += s.w;
+      }
+      return { ...c, w };
+    });
+    return weighted.sort((a, b) => b.w - a.w).map(({ r, g, b, a }) => ({ r, g, b, a }));
+  }
+}
+
+/** 局部 mulberry32（避免与 buffer 模块循环依赖） */
+function mulberry32l(a) {
+  return function next() {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 export const DEFAULT_PALETTE = () => Palette.from('pico8');

@@ -27,6 +27,7 @@ import { runScript } from '../lang/compiler.js';
 import { imageToPixels } from '../io/img2pixel.js';
 import { storeGet, storeSet } from '../io/store.js';
 import { SAMPLES } from '../samples.js';
+import { STYLE_PRESETS, applyStylePreset, serializeStylePreset, parseStylePreset } from '../core/presets.js';
 
 const STORAGE_KEY = 'pixelscribe.doc.v1';
 const SETTINGS_KEY = 'pixelscribe.settings.v1';
@@ -112,6 +113,7 @@ export class App {
     this.requestRender();
     this.setAiBadge();
     this.onSelectionChange();
+    this.refreshPresetOptions();
 
     window.addEventListener('beforeunload', () => this.save());
     setInterval(() => this.save(), 30000);
@@ -779,6 +781,139 @@ export class App {
     }
   }
 
+  /* ── 风格预设（v2.3） ── */
+
+  /** 内置 + 用户自定义预设。 */
+  allStylePresets() {
+    return [...STYLE_PRESETS, ...(this.settings.stylePresets || [])];
+  }
+
+  /** 刷新 AI 面板的预设下拉。 */
+  refreshPresetOptions() {
+    const sel = $('#aiPreset');
+    if (!sel) return;
+    const cur = sel.value;
+    sel.replaceChildren();
+    sel.append(el('option', { value: '', text: '— 无 —' }));
+    for (const p of this.allStylePresets()) {
+      sel.append(el('option', { value: p.id, text: p.name }));
+    }
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  }
+
+  /** 应用预设：切风格 + 可选执行其渲染脚本。 */
+  applyPreset(id, opts = {}) {
+    const preset = this.allStylePresets().find((p) => p.id === id);
+    if (!preset) { this.warn('未找到该预设'); return null; }
+    this.history.begin(`应用预设：${preset.name}`);
+    const r = applyStylePreset(this.doc, preset, { applyScript: opts.applyScript !== false });
+    this.history.commit();
+    this.syncStyleUI();
+    this.afterEdit(true);
+    if (r.report && !r.report.ok) this.warn(r.report.errors[0]);
+    toast(`已应用预设「${preset.name}」`, 'ok');
+    return r;
+  }
+
+  /** 把当前风格 + 脚本存为自定义预设。 */
+  savePresetDialog() {
+    const body = el('div', {}, [
+      el('p', { text: '把当前风格与一段渲染脚本存为可复用预设（保存在本机设置中）。' }),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '名称' }), el('input', { type: 'text', id: 'spName', value: `${this.doc.style} 预设` })]),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '调色板' }), el('input', { type: 'text', id: 'spPalette', value: '' , placeholder: 'pico8 / gameboy / cga …' })]),
+      el('label', { class: 'mini-field wide' }, [el('span', { text: '渲染脚本' }), el('textarea', { id: 'spScript', rows: '5', spellcheck: 'false', placeholder: 'light -1 -1 1 1\nrelief 0.9 0.35\nrender painting', text: '' })]),
+    ]);
+    modal({
+      title: '保存风格预设',
+      body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        {
+          label: '保存',
+          kind: 'primary',
+          onClick: () => {
+            const name = ($('#spName')?.value || '').trim();
+            if (!name) { toast('请填写名称', 'warn'); return; }
+            const preset = {
+              id: `user-${Date.now().toString(36)}`,
+              name,
+              style: this.doc.style,
+              palette: ($('#spPalette')?.value || '').trim() || undefined,
+              script: $('#spScript')?.value || '',
+              note: '',
+            };
+            this.settings.stylePresets = [...(this.settings.stylePresets || []), preset];
+            this.saveSettings();
+            this.refreshPresetOptions();
+            const sel = $('#aiPreset');
+            if (sel) sel.value = preset.id;
+            toast(`已保存预设「${name}」`, 'ok');
+          },
+        },
+      ],
+    });
+  }
+
+  /** 预设管理：导出 / 导入 / 删除。 */
+  managePresetsDialog() {
+    const body = el('div', { class: 'sample-list' });
+    const custom = this.settings.stylePresets || [];
+    if (!custom.length) body.append(el('p', { class: 'hint', text: '还没有自定义预设。用「存为预设」创建。' }));
+    for (const p of custom) {
+      body.append(el('div', { class: 'preset-row' }, [
+        el('b', { text: p.name }),
+        el('span', { class: 'hint', text: `${p.style} · ${(p.script || '').split('\n').filter(Boolean).length} 条指令` }),
+        el('button', {
+          class: 'btn small ghost danger',
+          text: '删除',
+          onclick: () => {
+            this.settings.stylePresets = custom.filter((x) => x.id !== p.id);
+            this.saveSettings();
+            this.refreshPresetOptions();
+            toast('已删除', 'ok', 1200);
+            $('#modalBackdrop').hidden = true;
+          },
+        }),
+      ]));
+    }
+    modal({
+      title: '管理风格预设',
+      body,
+      actions: [
+        {
+          label: '导入 JSON',
+          kind: 'ghost',
+          close: false,
+          onClick: () => {
+            const input = el('input', { type: 'file', accept: '.json,application/json' });
+            input.addEventListener('change', async () => {
+              const f = input.files?.[0];
+              if (!f) return;
+              try {
+                const preset = parseStylePreset(await readTextFile(f));
+                preset.id = `user-${Date.now().toString(36)}`;
+                this.settings.stylePresets = [...(this.settings.stylePresets || []), preset];
+                this.saveSettings();
+                this.refreshPresetOptions();
+                toast(`已导入预设「${preset.name}」`, 'ok');
+              } catch (err) { toast(`导入失败：${err.message}`, 'err'); }
+            });
+            input.click();
+          },
+        },
+        {
+          label: '导出全部',
+          kind: 'ghost',
+          onClick: () => {
+            const all = (this.settings.stylePresets || []).map((p) => serializeStylePreset(p)).join('\n\n');
+            downloadText('pixelscribe-presets.json', all || '[]', 'application/json');
+            toast('已导出预设', 'ok');
+          },
+        },
+      ],
+    });
+  }
+
   /* ── 顶栏 ── */
 
   bindTopbar() {
@@ -817,6 +952,11 @@ export class App {
     $('#btnExport').addEventListener('click', () => this.exportDialog());
     $('#btnTheme').addEventListener('click', () => this.applyTheme(this.settings.theme === 'light' ? 'dark' : 'light'));
     $('#btnSettings').addEventListener('click', () => this.settingsDialog());
+    $('#aiPreset')?.addEventListener('change', (e) => {
+      if (e.target.value) this.applyPreset(e.target.value, { applyScript: true });
+    });
+    $('#btnSavePreset')?.addEventListener('click', () => this.savePresetDialog());
+    $('#btnManagePresets')?.addEventListener('click', () => this.managePresetsDialog());
     $('#btnLocalRedraw')?.addEventListener('click', () => {
       this.applyLocalRender(this.renderer.selection, $('#aiBrief')?.value?.trim() || '');
     });
@@ -1530,6 +1670,7 @@ export class App {
       vision: this.config.vision ?? 'auto',
       maxTokens: this.config.maxTokens ?? 2048,
       theme: 'dark',
+      stylePresets: [],
     };
   }
 
@@ -1547,6 +1688,7 @@ export class App {
       vision: this.config?.vision ?? 'auto',
       maxTokens: this.config?.maxTokens ?? 2048,
       theme: 'dark',
+      stylePresets: [],
     };
     try {
       const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');

@@ -795,6 +795,49 @@ ok('WebM 导出在 jsdom 下安全降级', async () => {
   eq(r, null, '无 MediaRecorder 应返回 null');
 });
 
+/* ─────────── k-means / 风格预设 / 新 DSL（v2.3） ─────────── */
+
+ok('k-means 按钮与对话框', () => {
+  assert($('#btnKmeans'), '缺少 k-means 按钮');
+  $('#btnKmeans').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#kmK') && $('#kmSeed'), '缺少 k-means 表单');
+  $('#kmK').value = '8';
+  const go = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('提取'));
+  go.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#modalBackdrop').hidden, '提取后应关闭');
+});
+
+ok('风格预设下拉已填充且可应用', () => {
+  assert($('#aiPreset'), '缺少预设下拉');
+  assert($('#aiPreset').options.length >= 7, `预设选项过少 ${$('#aiPreset').options.length}`);
+  app.applyPreset('painting', { applyScript: false });
+  eq(app.doc.style, 'painting');
+  eq($('#aiStyle').value, 'painting', '风格选择器应同步');
+});
+
+ok('存为预设对话框可打开', () => {
+  $('#btnSavePreset').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#spName') && $('#spScript'), '缺少预设表单');
+  $('#spName').value = '测试预设';
+  const save = [...window.document.querySelectorAll('#modalFoot .btn')].find((b) => b.textContent.includes('保存'));
+  save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert((app.settings.stylePresets || []).some((p) => p.name === '测试预设'), '自定义预设未保存');
+  assert($('#aiPreset').options.length >= 8, '下拉未刷新');
+});
+
+ok('管理预设对话框可打开', () => {
+  $('#btnManagePresets').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert(window.document.querySelector('.preset-row'), '应列出自定义预设');
+  window.document.querySelector('#modalClose').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+});
+
+ok('新 DSL 指令可通过脚本面板运行', () => {
+  app.scriptPanel.setValue('size 32 32\nclear transparent\nradial 16 16 0 16 c7 c0\npattern 0 0 32 32 checker c8 2\nmap 0 0 32 32 invert');
+  $('#btnRunScript').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert($('#scriptReport').textContent.includes('指令'), '应输出执行报告');
+  assert(!$('#scriptReport').classList.contains('bad'), `报告错误：${$('#scriptReport').textContent}`);
+});
+
 /* ─────────── AI 闭环（演示模式） ─────────── */
 
 console.log('\n\x1b[38;5;213m▸ AI 面板（演示模式）\x1b[0m');

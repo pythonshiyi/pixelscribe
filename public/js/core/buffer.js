@@ -493,8 +493,126 @@ export function linearGrad(buf, x, y, w, h, c1, c2, dir = 'v') {
   }
 }
 
-/* ─────────────────────── 变换 ─────────────────────── */
+/**
+ * 径向渐变（v2.3）：从中心 (cx,cy) 半径 r0→r1 由 C1 过渡到 C2。
+ * @param {number} [power] 距离曲线幂次（1 线性，>1 更集中，<1 更均匀）
+ */
+export function radialGrad(buf, cx, cy, r0, r1, c1, c2, power = 1) {
+  const span = (r1 - r0) || 1;
+  for (let y = 0; y < buf.height; y++) {
+    for (let x = 0; x < buf.width; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < Math.min(r0, r1) || d > Math.max(r0, r1)) continue;
+      let t = (d - r0) / span;
+      t = Math.max(0, Math.min(1, t));
+      if (power !== 1) t = Math.pow(t, power);
+      buf.set(x, y, {
+        r: Math.round(c1.r + (c2.r - c1.r) * t),
+        g: Math.round(c1.g + (c2.g - c1.g) * t),
+        b: Math.round(c1.b + (c2.b - c1.b) * t),
+        a: Math.round(c1.a + (c2.a - c1.a) * t),
+      });
+    }
+  }
+}
 
+/**
+ * 图案填充（v2.3）：用 8×8 位图图案在区域内绘制 C1，透明处不绘制（或留空）。
+ * @param {'checker'|'stripes'|'dots'|'crosshatch'|'grid'|'bricks'|'zigzag'|'noise'} kind
+ * @param {number} [scale] 图案放大倍数
+ */
+export function patternFill(buf, x, y, w, h, c1, kind = 'checker', scale = 1) {
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  scale = Math.max(1, Math.round(scale));
+  const P = PATTERNS[kind] || PATTERNS.checker;
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const mx = Math.floor((x + px) / scale) % 8;
+      const my = Math.floor((y + py) / scale) % 8;
+      if (P[my] & (1 << (7 - mx))) buf.set(x + px, y + py, c1);
+    }
+  }
+}
+
+/** 8×8 单色图案位图（每行 8 位）。 */
+export const PATTERNS = {
+  checker: [0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55],
+  stripes: [0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00],
+  dots: [0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x24],
+  crosshatch: [0x22, 0x14, 0x08, 0x14, 0x22, 0x41, 0x80, 0x41],
+  grid: [0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xff],
+  bricks: [0xfe, 0x82, 0x82, 0xfe, 0xef, 0xa9, 0xa9, 0xef],
+  zigzag: [0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81],
+  noise: [0x5a, 0xa5, 0x96, 0x69, 0x96, 0x69, 0x5a, 0xa5],
+};
+
+/** 图案名列表（供 UI 与校验）。 */
+export const PATTERN_NAMES = Object.keys(PATTERNS);
+
+/**
+ * 通道映射（v2.3）：对区域内像素做颜色变换。
+ * @param {'invert'|'gray'|'sepia'|'posterize'|'threshold'|'brighten'|'darken'|'saturate'|'channel'} kind
+ * @param {number} amount 强度/参数（posterize 为级数，threshold 为阈值 0..1）
+ * @param {object} [extra] channel 模式用 { from:'r'|'g'|'b'|'a', to:... }
+ */
+export function colorMap(buf, x, y, w, h, kind = 'gray', amount = 1, extra = {}) {
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  const x1 = Math.min(buf.width, x + w), y1 = Math.min(buf.height, y + h);
+  for (let py = Math.max(0, y); py < y1; py++) {
+    for (let px = Math.max(0, x); px < x1; px++) {
+      const c = buf.get(px, py);
+      if (c.a === 0) continue;
+      let out = { ...c };
+      if (kind === 'invert') out = { r: 255 - c.r, g: 255 - c.g, b: 255 - c.b, a: c.a };
+      else if (kind === 'gray') {
+        const l = Math.round(0.299 * c.r + 0.587 * c.g + 0.114 * c.b);
+        const t = Math.max(0, Math.min(1, amount));
+        out = { r: Math.round(c.r + (l - c.r) * t), g: Math.round(c.g + (l - c.g) * t), b: Math.round(c.b + (l - c.b) * t), a: c.a };
+      } else if (kind === 'sepia') {
+        const t = Math.max(0, Math.min(1, amount));
+        const sr = 0.393 * c.r + 0.769 * c.g + 0.189 * c.b;
+        const sg = 0.349 * c.r + 0.686 * c.g + 0.168 * c.b;
+        const sb = 0.272 * c.r + 0.534 * c.g + 0.131 * c.b;
+        out = {
+          r: Math.round(c.r + (Math.min(255, sr) - c.r) * t),
+          g: Math.round(c.g + (Math.min(255, sg) - c.g) * t),
+          b: Math.round(c.b + (Math.min(255, sb) - c.b) * t),
+          a: c.a,
+        };
+      } else if (kind === 'posterize') {
+        const n = Math.max(2, Math.round(amount || 4));
+        const q = (v) => Math.round(Math.round((v / 255) * (n - 1)) / (n - 1) * 255);
+        out = { r: q(c.r), g: q(c.g), b: q(c.b), a: c.a };
+      } else if (kind === 'threshold') {
+        const l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        const v = l >= (amount ?? 0.5) * 255 ? 255 : 0;
+        out = { r: v, g: v, b: v, a: c.a };
+      } else if (kind === 'brighten' || kind === 'darken') {
+        const k = kind === 'brighten' ? 1 + amount : 1 - amount;
+        out = { r: Math.min(255, Math.round(c.r * k)), g: Math.min(255, Math.round(c.g * k)), b: Math.min(255, Math.round(c.b * k)), a: c.a };
+      } else if (kind === 'saturate') {
+        const l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        const k = 1 + amount;
+        out = {
+          r: Math.max(0, Math.min(255, Math.round(l + (c.r - l) * k))),
+          g: Math.max(0, Math.min(255, Math.round(l + (c.g - l) * k))),
+          b: Math.max(0, Math.min(255, Math.round(l + (c.b - l) * k))),
+          a: c.a,
+        };
+      } else if (kind === 'channel') {
+        const { from = 'r', to = 'g', mix = 1 } = extra;
+        const src = c[from] ?? 0;
+        const cur = c[to] ?? 0;
+        out = { ...c, [to]: Math.round(cur + (src - cur) * Math.max(0, Math.min(1, mix))) };
+      }
+      buf.set(px, py, out);
+    }
+  }
+}
+
+/* ─────────────────────── 变换 ─────────────────────── */
 /** @returns {PixelBuffer} */
 export function flipBuffer(buf, axis) {
   const out = new PixelBuffer(buf.width, buf.height);

@@ -281,6 +281,44 @@ export function initPalette(app) {
   $('#btnExtract').addEventListener('click', extract);
   $('#btnExtract2').addEventListener('click', extract);
 
+  $('#btnKmeans')?.addEventListener('click', () => {
+    const body = el('div', {}, [
+      el('p', { text: 'k-means 聚类提取代表性配色（比按频次更均衡，适合照片/绘画）。' }),
+      el('label', { class: 'mini-field wide' }, [
+        el('span', { text: '颜色数' }),
+        el('input', { type: 'number', id: 'kmK', min: '2', max: '32', value: '16' }),
+      ]),
+      el('label', { class: 'mini-field wide' }, [
+        el('span', { text: '随机种子' }),
+        el('input', { type: 'number', id: 'kmSeed', value: '1' }),
+      ]),
+    ]);
+    modal({
+      title: 'k-means 提取配色',
+      body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        {
+          label: '提取',
+          kind: 'primary',
+          onClick: () => {
+            const k = Math.max(2, Math.min(32, Number($('#kmK')?.value) || 16));
+            const seed = Number($('#kmSeed')?.value) || 1;
+            const colors = Palette.kmeans(app.doc.composite(), { k, seed, includeTransparent: false });
+            if (colors.length < 2) { toast('图像内容太少，无法提取', 'warn'); return; }
+            app.history.begin('k-means 提取色板');
+            app.doc.palette = new Palette(colors, {}, `k-means ${colors.length}`);
+            app.history.commit();
+            preset.value = '';
+            refresh();
+            app.afterEdit();
+            toast(`k-means 提取 ${colors.length} 色`, 'ok');
+          },
+        },
+      ],
+    });
+  });
+
   function extract() {
     const colors = Palette.extract(app.doc.composite(), 16, false);
     if (colors.length < 2) { toast('图像内容太少，无法提取色板', 'warn'); return; }
